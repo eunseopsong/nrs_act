@@ -14,7 +14,8 @@ import matplotlib.pyplot as plt
 # -------------------------------------------------
 # 기본 경로 (필요하면 수정)
 # -------------------------------------------------
-EPISODE_DIR = "/home/eunseop/nrs_lab2/datasets/ACT/1114_1643/episodes"
+# EPISODE_DIR = "/home/eunseop/nrs_lab2/datasets/ACT/1114_1643/episodes"
+EPISODE_DIR = "/home/eunseop/nrs_act/datasets/ACT/1114_1643/episodes"
 
 
 def load_qpos_from_episode(ep_dir: str, episode_idx: int) -> np.ndarray:

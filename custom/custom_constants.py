@@ -10,7 +10,8 @@ import math
 #   C++ 레코더가 저장하는 최상위 디렉토리:
 #   /home/eunseop/nrs_lab2/datasets/ACT/<MMDD_HHMM>/act_data.hdf5
 # -------------------------------------------------------------------------
-DATA_DIR = "/home/eunseop/nrs_lab2/datasets/ACT"
+# DATA_DIR = "/home/eunseop/nrs_lab2/datasets/ACT"
+DATA_DIR = "/home/eunseop/nrs_act/datasets/ACT"
 
 
 def _find_latest_run_dir(base_dir: str) -> str:

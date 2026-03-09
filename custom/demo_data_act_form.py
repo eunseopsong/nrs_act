@@ -10,7 +10,8 @@ from typing import Optional, List, Tuple
 from datetime import datetime
 from pathlib import Path
 
-ROOT_DEFAULT = "/home/eunseop/nrs_lab2/datasets/ACT"
+# ROOT_DEFAULT = "/home/eunseop/nrs_lab2/datasets/ACT"
+ROOT_DEFAULT = "/home/eunseop/nrs_act/datasets/ACT"
 MERGED_SUBDIR = "merged_hdf5"
 
 

@@ -6,7 +6,8 @@ import torch
 # ---------------------------------------------------------------------
 # 1) 가장 최신 타임스탬프 폴더에서 policy_best.ckpt 선택
 # ---------------------------------------------------------------------
-CKPT_ROOT = "/home/eunseop/nrs_lab2/checkpoints/ur10e_swing"
+# CKPT_ROOT = "/home/eunseop/nrs_lab2/checkpoints/ur10e_swing"
+CKPT_ROOT = "/home/eunseop/nrs_act/checkpoints/ur10e_swing"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
