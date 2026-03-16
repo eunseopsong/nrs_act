@@ -16,10 +16,6 @@ import h5py
 # Basic utils
 # -----------------------------
 def set_seed(seed: int) -> None:
-    """
-    Set seeds for reproducibility.
-    Keep behavior lightweight (do not force cudnn deterministic here).
-    """
     seed = int(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -28,9 +24,6 @@ def set_seed(seed: int) -> None:
 
 
 def detach_dict(d: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Detach all tensor values (shallow).
-    """
     out = {}
     for k, v in d.items():
         if torch.is_tensor(v):
@@ -41,11 +34,6 @@ def detach_dict(d: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def compute_dict_mean(dict_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-    """
-    Compute mean over a list of metric dicts.
-    Values can be torch tensors or floats/ints.
-    Returns torch tensors on CPU.
-    """
     if len(dict_list) == 0:
         return {}
 
@@ -105,15 +93,6 @@ def _resolve_cam_key(img_grp: h5py.Group, requested: str) -> str:
 # Normalization stats (MIN-MAX per-dim -> [0,1])
 # -----------------------------
 def compute_norm_stats_all(episode_files: List[str]) -> Dict[str, np.ndarray]:
-    """
-    Compute min/max for:
-      qpos   = [position(6), force(3)] => (9,)
-      action = [position(6), force(3)] => (9,)
-    over all valid (non-pad) timesteps of all given episodes.
-
-    Returned stats:
-      qpos_min, qpos_max, action_min, action_max (float32, shape (9,))
-    """
     q_min = q_max = None
     a_min = a_max = None
 
@@ -132,8 +111,8 @@ def compute_norm_stats_all(episode_files: List[str]) -> Dict[str, np.ndarray]:
             if valid.sum() == 0:
                 continue
 
-            qv = q[valid]  # (N,9)
-            av = a[valid]  # (N,9)
+            qv = q[valid]
+            av = a[valid]
 
             qv_min = np.min(qv, axis=0)
             qv_max = np.max(qv, axis=0)
@@ -172,37 +151,26 @@ def compute_norm_stats_all(episode_files: List[str]) -> Dict[str, np.ndarray]:
 
 
 def denormalize_action(action_norm: np.ndarray, stats: Dict[str, np.ndarray]) -> np.ndarray:
-    """
-    action_norm: (...,9) normalized in [0,1]
-    return:      (...,9) real scale
-    """
     if "action_min" in stats and "action_max" in stats:
         mn = stats["action_min"].reshape((1,) * (action_norm.ndim - 1) + (9,))
         mx = stats["action_max"].reshape((1,) * (action_norm.ndim - 1) + (9,))
         return action_norm * (mx - mn) + mn
 
-    # backward compatibility (old mean/std)
     mu = stats["action_mean"].reshape((1,) * (action_norm.ndim - 1) + (9,))
     sd = stats["action_std"].reshape((1,) * (action_norm.ndim - 1) + (9,))
     return action_norm * sd + mu
 
 
 # -----------------------------
-# Dataset (EpisodicStartDataset)
+# Dataset
 # -----------------------------
 class EpisodicStartDataset(Dataset):
     """
-    FAST start-ts sampling dataset.
-
     Returns:
       image : (K,3,H,W) float [0,1]
-      qpos  : (9,)      min-max normalized to [0,1] per-dim
-      action: (T,9)     min-max normalized to [0,1] per-dim
-      is_pad: (T,)      bool
-
-    IMPORTANT:
-      __len__ = num_episodes * samples_per_episode
-      -> restores "many iterations per epoch"
+      qpos  : (9,)
+      action: (T,9)
+      is_pad: (T,)
     """
 
     def __init__(
@@ -261,22 +229,19 @@ class EpisodicStartDataset(Dataset):
             start_ts = int(rng.randint(0, max(1, valid_len)))
             a_start = start_ts if self.is_sim else max(0, start_ts - 1)
 
-            # qpos(9) = pos6 + force3
             pos = np.asarray(h["/observations/position"][start_ts], dtype=np.float32)
             frc = np.asarray(h["/observations/force"][start_ts], dtype=np.float32)
             qpos = np.concatenate([pos, frc], axis=-1).astype(np.float32)
 
-            # images at start_ts only (KEEP multi-cam: (K,3,H,W))
             img_grp = h["/observations/images"]
             cam_imgs = []
             for cam in self.camera_names:
                 cam_key = _resolve_cam_key(img_grp, cam)
-                img = np.asarray(img_grp[cam_key][start_ts], dtype=np.uint8)  # (H,W,3)
-                img = np.transpose(img, (2, 0, 1))  # (3,H,W)
+                img = np.asarray(img_grp[cam_key][start_ts], dtype=np.uint8)
+                img = np.transpose(img, (2, 0, 1))
                 cam_imgs.append(img)
-            cam_imgs = np.stack(cam_imgs, axis=0)  # (K,3,H,W)
+            cam_imgs = np.stack(cam_imgs, axis=0)
 
-            # action full (T,9)
             a_pos_full = np.asarray(h["/action/position"][()], dtype=np.float32)
             a_frc_full = np.asarray(h["/action/force"][()], dtype=np.float32)
             act_full = np.concatenate([a_pos_full, a_frc_full], axis=-1).astype(np.float32)
@@ -308,7 +273,7 @@ class EpisodicStartDataset(Dataset):
 
 
 # -----------------------------
-# load_data() (KEEP existing episode_*.hdf5 search)
+# load_data
 # -----------------------------
 def load_data(
     dataset_dir: str,
@@ -326,13 +291,6 @@ def load_data(
     prefetch_factor: int = 2,
     drop_last_train: bool = True,
 ) -> Tuple[DataLoader, DataLoader, Dict[str, np.ndarray], Dict]:
-    """
-    - list episode_*.hdf5 (DIRECT under dataset_dir)
-    - 80/20 split
-    - compute min/max stats
-    - create datasets/loaders
-    - return (train_loader, val_loader, stats, meta)
-    """
     ep_files = sorted(glob.glob(os.path.join(dataset_dir, "episode_*.hdf5")))
     if len(ep_files) == 0:
         raise FileNotFoundError(f"No episode_*.hdf5 found in {dataset_dir}")
@@ -343,7 +301,6 @@ def load_data(
     else:
         N = len(ep_files)
 
-    # sim attr (optional)
     is_sim = False
     try:
         with h5py.File(ep_files[0], "r") as h0:
@@ -352,16 +309,13 @@ def load_data(
     except Exception:
         is_sim = False
 
-    # split 80/20
     rng = np.random.RandomState(seed)
     perm = rng.permutation(N)
     n_train = max(1, int(0.8 * N))
     train_files = [ep_files[i] for i in perm[:n_train]]
     val_files = [ep_files[i] for i in perm[n_train:]] or train_files[:max(1, len(train_files) // 5)]
 
-    # NOTE:
-    # Keep current behavior for compatibility.
-    # If you want stricter evaluation later, change this to train_files only.
+    # 기존 동작 유지
     stats = compute_norm_stats_all(train_files + val_files)
 
     train_ds = EpisodicStartDataset(

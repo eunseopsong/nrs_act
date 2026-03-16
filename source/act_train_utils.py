@@ -3,9 +3,6 @@
 
 """
 Training helper utilities for ACT/CNNMLP training.
-
-This file was split from custom_imitate_episodes.py
-to keep scripts/act/train_act.py lightweight.
 """
 
 import os
@@ -18,16 +15,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from utils import (
-    compute_dict_mean,
-    set_seed,
-)
-
+from utils import compute_dict_mean, set_seed
 from policy import ACTPolicy, CNNMLPPolicy
 
 
 # -------------------------------------------------------------------------
-# 유틸: 루트 디렉터리 아래에서 타임스탬프 폴더 중 최신 찾기
+# Filesystem helper
 # -------------------------------------------------------------------------
 def find_latest_timestamped_subdir(root_dir: str) -> Optional[str]:
     if not os.path.isdir(root_dir):
@@ -59,7 +52,7 @@ def find_latest_timestamped_subdir(root_dir: str) -> Optional[str]:
 
 
 # -------------------------------------------------------------------------
-# HELPER
+# Policy helper
 # -------------------------------------------------------------------------
 def make_policy(policy_class: str, policy_config: dict):
     if policy_class == "ACT":
@@ -74,9 +67,9 @@ def forward_pass(batch, policy, device):
     """
     batch: (image, qpos, action, is_pad)
       image : (B, K, 3, H, W) float [0,1]
-      qpos  : (B, 9)          normalized to [0,1]
-      action: (B, T, 9)       normalized to [0,1]
-      is_pad: (B, T)          bool
+      qpos  : (B, 9)
+      action: (B, T, 9)
+      is_pad: (B, T)
     """
     image, qpos, action, is_pad = batch
     image = image.to(device, non_blocking=True)
@@ -109,7 +102,7 @@ def plot_history(train_history, validation_history, num_epochs, ckpt_dir, seed):
 
 
 # -------------------------------------------------------------------------
-# Debug norm: per-dim mean/std (9D + RGB)
+# Debug norm
 # -------------------------------------------------------------------------
 _DIM_NAMES_9 = ["x", "y", "z", "wx", "wy", "wz", "fx", "fy", "fz"]
 _RGB_NAMES = ["r", "g", "b"]
@@ -124,45 +117,33 @@ def _print_1d_mean_std(prefix: str, names, mean_vec: torch.Tensor, std_vec: torc
 
 @torch.no_grad()
 def debug_norm_once(loader, tag: str, max_batches: int = 1):
-    """
-    Prints post-normalization mean/std for:
-      - qpos (9 dims)
-      - action (9 dims, valid only)
-      - image RGB channels (3 dims)  (image is [0,1] before policy.py normalize)
-    """
     for b_idx, batch in enumerate(loader):
         image, qpos, action, is_pad = batch
-        # image: (B,K,3,H,W), qpos:(B,9), action:(B,T,9), is_pad:(B,T)
         print(
             f"\n[NORM-DEBUG/{tag}] shapes: "
             f"image={tuple(image.shape)} qpos={tuple(qpos.shape)} "
             f"action={tuple(action.shape)} is_pad={tuple(is_pad.shape)}"
         )
 
-        # ---- qpos (normalized) per-dim ----
         q_mean = qpos.mean(dim=0)
         q_std = qpos.std(dim=0, unbiased=False)
         _print_1d_mean_std(f"[NORM-DEBUG/{tag}] qpos(norm)", _DIM_NAMES_9, q_mean, q_std)
 
-        # ---- action (normalized) per-dim (valid only) ----
-        valid = ~is_pad  # (B,T)
+        valid = ~is_pad
         n_valid = int(valid.sum().item())
         print(f"[NORM-DEBUG/{tag}] valid action steps: {n_valid} / {int(is_pad.numel())}")
         if n_valid > 0:
-            a_valid = action[valid]  # (n_valid, 9)
+            a_valid = action[valid]
             a_mean = a_valid.mean(dim=0)
             a_std = a_valid.std(dim=0, unbiased=False)
             _print_1d_mean_std(f"[NORM-DEBUG/{tag}] action(norm)", _DIM_NAMES_9, a_mean, a_std)
         else:
-            print(f"[NORM-DEBUG/{tag}] ⚠️ no valid timesteps (check is_pad/valid_len)")
+            print(f"[NORM-DEBUG/{tag}] ⚠️ no valid timesteps")
 
-        # ---- image [0,1] RGB channel stats ----
-        # image mean/std over (B,K,H,W) for each channel
-        img_ch_mean = image.mean(dim=(0, 1, 3, 4))  # (3,)
-        img_ch_std = image.std(dim=(0, 1, 3, 4), unbiased=False)  # (3,)
+        img_ch_mean = image.mean(dim=(0, 1, 3, 4))
+        img_ch_std = image.std(dim=(0, 1, 3, 4), unbiased=False)
         _print_1d_mean_std(f"[NORM-DEBUG/{tag}] image([0,1])", _RGB_NAMES, img_ch_mean, img_ch_std)
 
-        # optional quick range sanity
         q_minv, q_maxv = float(qpos.min().item()), float(qpos.max().item())
         if n_valid > 0:
             a_minv = float(action[valid].min().item())
@@ -182,6 +163,28 @@ def debug_norm_once(loader, tag: str, max_batches: int = 1):
             break
 
 
+# -------------------------------------------------------------------------
+# AMP helpers
+# -------------------------------------------------------------------------
+def _make_grad_scaler(use_amp: bool, device: torch.device):
+    enabled = bool(use_amp and device.type == "cuda")
+    try:
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    except Exception:
+        return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def _autocast_context(use_amp: bool, device: torch.device):
+    enabled = bool(use_amp and device.type == "cuda")
+    try:
+        return torch.amp.autocast(device_type="cuda", enabled=enabled)
+    except Exception:
+        return torch.cuda.amp.autocast(enabled=enabled)
+
+
+# -------------------------------------------------------------------------
+# Train
+# -------------------------------------------------------------------------
 def train_bc(train_dataloader, val_dataloader, config):
     num_epochs = config["num_epochs"]
     ckpt_dir = config["ckpt_dir"]
@@ -195,15 +198,13 @@ def train_bc(train_dataloader, val_dataloader, config):
 
     set_seed(seed)
 
-    # perf flags (optional; keep)
     torch.backends.cudnn.benchmark = True
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    # debug norm at start
     if debug_norm:
-        print("[INFO] debug_norm enabled: printing post-normalization per-dim mean/std for TRAIN and VAL (then continue).")
+        print("[INFO] debug_norm enabled: printing post-normalization stats for TRAIN and VAL.")
         try:
             debug_norm_once(train_dataloader, tag="TRAIN", max_batches=debug_norm_batches)
         except Exception as e:
@@ -215,8 +216,7 @@ def train_bc(train_dataloader, val_dataloader, config):
 
     policy = make_policy(policy_class, policy_config).to(device)
     optimizer = policy.configure_optimizers()
-
-    scaler = torch.cuda.amp.GradScaler(enabled=(use_amp and device.type == "cuda"))
+    scaler = _make_grad_scaler(use_amp, device)
 
     train_history, validation_history = [], []
     min_val_loss = float("inf")
@@ -233,7 +233,7 @@ def train_bc(train_dataloader, val_dataloader, config):
             policy.eval()
             epoch_dicts = []
             for batch in val_dataloader:
-                with torch.cuda.amp.autocast(enabled=(use_amp and device.type == "cuda")):
+                with _autocast_context(use_amp, device):
                     out = forward_pass(batch, policy, device)
                 epoch_dicts.append({k: out[k].detach().float().cpu() for k in out})
 
@@ -258,7 +258,7 @@ def train_bc(train_dataloader, val_dataloader, config):
 
         batch_dicts = []
         for batch_idx, batch in enumerate(train_dataloader):
-            with torch.cuda.amp.autocast(enabled=(use_amp and device.type == "cuda")):
+            with _autocast_context(use_amp, device):
                 forward_dict = forward_pass(batch, policy, device)
                 loss = forward_dict["loss"]
 
@@ -277,7 +277,6 @@ def train_bc(train_dataloader, val_dataloader, config):
         train_history.append(epoch_train_summary)
         print("Train:", " | ".join([f"{k}:{epoch_train_summary[k]:.6f}" for k in epoch_train_summary]))
 
-        # ---------------- Save intermediate ckpt ----------------
         if epoch % 100 == 0:
             ckpt_path = os.path.join(ckpt_dir, f"policy_epoch_{epoch}_seed_{seed}.ckpt")
             if policy_class == "ACT":
