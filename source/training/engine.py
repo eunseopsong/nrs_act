@@ -2,35 +2,19 @@
 # -*- coding: utf-8 -*-
 
 import os
-from contextlib import nullcontext
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
 import torch
 from tqdm import tqdm
 
 from common.utils import set_seed
 from models.policy import ACTPolicy, CNNMLPPolicy
+from training.debug import debug_norm_once, make_grad_scaler, autocast_context
 
 try:
     from training.plotting import plot_history
 except Exception:
     plot_history = None
-
-
-def _autocast_context(enabled: bool, device: torch.device):
-    if not enabled:
-        return nullcontext()
-
-    device_type = "cuda" if str(device).startswith("cuda") else "cpu"
-    if device_type == "cuda":
-        return torch.cuda.amp.autocast(enabled=True)
-    return nullcontext()
-
-
-def _make_grad_scaler(enabled: bool):
-    if enabled and torch.cuda.is_available():
-        return torch.cuda.amp.GradScaler(enabled=True)
-    return None
 
 
 def _scalarize_loss_dict(loss_dict: Dict[str, torch.Tensor]) -> Dict[str, float]:
@@ -119,7 +103,7 @@ def _run_validation(
     val_dicts = []
 
     for batch in val_loader:
-        with _autocast_context(amp_enabled, device):
+        with autocast_context(amp_enabled, device):
             out = forward_pass(batch, policy, device)
         val_dicts.append(_scalarize_loss_dict(out))
 
@@ -148,7 +132,7 @@ def _save_checkpoint(
 
 def train_bc(train_loader, val_loader, config):
     """
-    Expected config keys (backward-compatible):
+    Expected config keys:
       - device
       - seed
       - policy_class
@@ -156,8 +140,10 @@ def train_bc(train_loader, val_loader, config):
       - num_epochs
       - ckpt_dir
       - amp (optional)
-      - debug_batches (optional, default=3)
-      - save_every (optional, default=0)
+      - debug_norm (optional)
+      - debug_norm_batches (optional)
+      - debug_batches (optional)
+      - save_every (optional)
     """
     device = config["device"]
     seed = int(config.get("seed", 0))
@@ -167,15 +153,29 @@ def train_bc(train_loader, val_loader, config):
     ckpt_dir = config["ckpt_dir"]
 
     amp_enabled = bool(config.get("amp", False))
+    debug_norm = bool(config.get("debug_norm", False))
+    debug_norm_batches = int(config.get("debug_norm_batches", 1))
     debug_batches = int(config.get("debug_batches", 3))
     save_every = int(config.get("save_every", 0))
 
     os.makedirs(ckpt_dir, exist_ok=True)
     set_seed(seed)
 
+    # --------------------------------------------------
+    # normalization debug (restore original behavior)
+    # --------------------------------------------------
+    if debug_norm:
+        print("[INFO] debug_norm enabled: printing post-normalization stats for TRAIN and VAL.")
+        debug_norm_once(train_loader, tag="TRAIN", max_batches=debug_norm_batches)
+        debug_norm_once(val_loader, tag="VAL", max_batches=debug_norm_batches)
+
+    # --------------------------------------------------
+    # build policy after debug print
+    # (keeps previous visible log order similar)
+    # --------------------------------------------------
     policy = make_policy(policy_class, policy_config).to(device)
     optimizer = policy.configure_optimizers()
-    scaler = _make_grad_scaler(amp_enabled)
+    scaler = make_grad_scaler(amp_enabled, device)
 
     n_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     print(f"[DEBUG] Policy class = {policy_class}, trainable params = {n_params / 1e6:.2f}M")
@@ -196,7 +196,7 @@ def train_bc(train_loader, val_loader, config):
         print(f"Epoch {epoch}")
 
         # --------------------------------------------------
-        # Validation first (keeps current logging style)
+        # Validation first
         # --------------------------------------------------
         val_summary = _run_validation(
             val_loader=val_loader,
@@ -233,7 +233,7 @@ def train_bc(train_loader, val_loader, config):
         for batch_idx, batch in enumerate(train_loader):
             optimizer.zero_grad(set_to_none=True)
 
-            with _autocast_context(amp_enabled, device):
+            with autocast_context(amp_enabled, device):
                 out = forward_pass(batch, policy, device)
                 loss = out["loss"]
 
@@ -256,7 +256,7 @@ def train_bc(train_loader, val_loader, config):
         train_summary = _mean_dict(train_dicts)
         history["train"].append({"epoch": epoch, **train_summary})
 
-        # save periodic checkpoint
+        # optional periodic checkpoint
         if save_every > 0 and ((epoch + 1) % save_every == 0):
             periodic_ckpt = os.path.join(ckpt_dir, f"policy_epoch_{epoch:04d}.ckpt")
             _save_checkpoint(
@@ -269,7 +269,7 @@ def train_bc(train_loader, val_loader, config):
                 config=config,
             )
 
-        # update tqdm postfix
+        # tqdm postfix
         postfix = {}
         if "loss" in train_summary:
             postfix["train_loss"] = f"{train_summary['loss']:.4f}"
