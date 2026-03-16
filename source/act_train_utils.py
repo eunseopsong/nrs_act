@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from utils import compute_dict_mean, set_seed
-from policy import ACTPolicy, CNNMLPPolicy
+from models.policy import ACTPolicy, CNNMLPPolicy
 
 
 # -------------------------------------------------------------------------
