@@ -36,8 +36,9 @@ for p in [_PROJECT_ROOT, _SOURCE_DIR]:
 
 import torch
 
+from training.engine import train_bc, make_policy
+from common.fs import find_latest_timestamped_subdir
 from data.loader import load_data
-from act_train_utils import train_bc, find_latest_timestamped_subdir, make_policy
 
 
 # -----------------------------
