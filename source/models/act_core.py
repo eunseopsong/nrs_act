@@ -9,6 +9,11 @@ from torch.autograd import Variable
 
 from .backbone import build_backbone
 from .transformer import build_transformer, TransformerEncoder, TransformerEncoderLayer
+from .encoder import (
+    PositionForceObservationEncoder,
+    ImageObservationEncoder,
+    CNNMLPImageEncoder,
+)
 
 
 def _build_args(args_override: dict) -> SimpleNamespace:
@@ -37,6 +42,15 @@ def _build_args(args_override: dict) -> SimpleNamespace:
         # dimensions
         state_dim=9,
         action_dim=9,
+        position_dim=6,
+        force_dim=3,
+        # new encoder configs
+        position_encoder_hidden_dim=128,
+        force_encoder_hidden_dim=64,
+        force_encoder_num_layers=1,
+        force_encoder_dropout=0.0,
+        observation_encoder_activation="gelu",
+        cnnmlp_observation_embed_dim=256,
     )
     defaults.update(args_override)
     return SimpleNamespace(**defaults)
@@ -66,9 +80,29 @@ class DETRVAE(nn.Module):
     Default:
       obs dim    = 9  (pos6 + force3)
       action dim = 9  (pos6 + force3)
+
+    Backward compatibility:
+    - qpos only                -> uses current force as length-1 GRU history
+    - qpos + force_history     -> uses provided force history
     """
 
-    def __init__(self, backbones, transformer, encoder, obs_dim, action_dim, num_queries, camera_names):
+    def __init__(
+        self,
+        backbones,
+        transformer,
+        encoder,
+        obs_dim,
+        action_dim,
+        num_queries,
+        camera_names,
+        position_dim=6,
+        force_dim=3,
+        position_encoder_hidden_dim=128,
+        force_encoder_hidden_dim=64,
+        force_encoder_num_layers=1,
+        force_encoder_dropout=0.0,
+        observation_encoder_activation="gelu",
+    ):
         super().__init__()
         self.num_queries = num_queries
         self.camera_names = camera_names
@@ -82,18 +116,40 @@ class DETRVAE(nn.Module):
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
 
         if backbones is not None:
-            self.input_proj = nn.Conv2d(backbones[0].num_channels, hidden_dim, kernel_size=1)
-            self.backbones = nn.ModuleList(backbones)
-            self.input_proj_robot_state = nn.Linear(obs_dim, hidden_dim)
+            self.image_encoder = ImageObservationEncoder(
+                backbones=backbones,
+                hidden_dim=hidden_dim,
+                camera_names=camera_names,
+            )
         else:
-            self.backbones = None
-            self.input_proj_robot_state = nn.Linear(obs_dim, hidden_dim)
+            self.image_encoder = None
+
+        self.transformer_observation_encoder = PositionForceObservationEncoder(
+            position_dim=position_dim,
+            force_dim=force_dim,
+            position_hidden_dim=position_encoder_hidden_dim,
+            force_gru_hidden_dim=force_encoder_hidden_dim,
+            force_gru_num_layers=force_encoder_num_layers,
+            force_gru_dropout=force_encoder_dropout,
+            output_dim=hidden_dim,
+            activation=observation_encoder_activation,
+        )
+
+        self.latent_observation_encoder = PositionForceObservationEncoder(
+            position_dim=position_dim,
+            force_dim=force_dim,
+            position_hidden_dim=position_encoder_hidden_dim,
+            force_gru_hidden_dim=force_encoder_hidden_dim,
+            force_gru_num_layers=force_encoder_num_layers,
+            force_gru_dropout=force_encoder_dropout,
+            output_dim=hidden_dim,
+            activation=observation_encoder_activation,
+        )
 
         self.latent_dim = 32
         self.cls_embed = nn.Embedding(1, hidden_dim)
 
         self.encoder_action_proj = nn.Linear(action_dim, hidden_dim)
-        self.encoder_joint_proj = nn.Linear(obs_dim, hidden_dim)
 
         self.latent_proj = nn.Linear(hidden_dim, self.latent_dim * 2)
         self.register_buffer("pos_table", get_sinusoid_encoding_table(1 + 1 + num_queries, hidden_dim))
@@ -101,7 +157,17 @@ class DETRVAE(nn.Module):
         self.latent_out_proj = nn.Linear(self.latent_dim, hidden_dim)
         self.additional_pos_embed = nn.Embedding(2, hidden_dim)
 
-    def forward(self, qpos, image, env_state=None, actions=None, is_pad=None):
+        _ = obs_dim  # kept for backward compatibility
+
+    def forward(
+        self,
+        qpos,
+        image,
+        env_state=None,
+        actions=None,
+        is_pad=None,
+        force_history=None,
+    ):
         if qpos.dim() == 3:
             qpos = qpos[:, 0, :]
         if image.dim() == 6:
@@ -112,10 +178,15 @@ class DETRVAE(nn.Module):
 
         if is_training:
             action_embed = self.encoder_action_proj(actions)
-            qpos_embed = self.encoder_joint_proj(qpos).unsqueeze(1)
+
+            observation_embed = self.latent_observation_encoder(
+                qpos=qpos,
+                force_history=force_history,
+            ).unsqueeze(1)
+
             cls_embed = self.cls_embed.weight.unsqueeze(0).repeat(bs, 1, 1)
 
-            encoder_input = torch.cat([cls_embed, qpos_embed, action_embed], dim=1)
+            encoder_input = torch.cat([cls_embed, observation_embed, action_embed], dim=1)
             encoder_input = encoder_input.permute(1, 0, 2)
 
             cls_joint_is_pad = torch.full((bs, 2), False, device=qpos.device)
@@ -141,23 +212,13 @@ class DETRVAE(nn.Module):
             latent_sample = torch.zeros([bs, self.latent_dim], dtype=torch.float32, device=qpos.device)
             latent_input = self.latent_out_proj(latent_sample)
 
-        if self.backbones is not None:
-            all_cam_features, all_cam_pos = [], []
+        if self.image_encoder is not None:
+            src, pos = self.image_encoder(image)
 
-            for cam_id, cam_name in enumerate(self.camera_names):
-                cam_img = image[:, cam_id]
-                features, pos = self.backbones[0](cam_img)  # shared backbone
-
-                features = features[0]
-                pos = pos[0]
-
-                proj_feat = self.input_proj(features)
-                all_cam_features.append(proj_feat)
-                all_cam_pos.append(pos)
-
-            src = torch.cat(all_cam_features, dim=3)
-            pos = torch.cat(all_cam_pos, dim=3)
-            proprio_input = self.input_proj_robot_state(qpos)
+            proprio_input = self.transformer_observation_encoder(
+                qpos=qpos,
+                force_history=force_history,
+            )
 
             hs = self.transformer(
                 src,
@@ -169,12 +230,16 @@ class DETRVAE(nn.Module):
                 self.additional_pos_embed.weight,
             )[0]
         else:
-            qpos_emb = self.input_proj_robot_state(qpos)
+            observation_embed = self.transformer_observation_encoder(
+                qpos=qpos,
+                force_history=force_history,
+            ).unsqueeze(1)
+
             hs = self.transformer(
-                qpos_emb,
+                observation_embed,
                 None,
                 self.query_embed.weight,
-                self.additional_pos_embed.weight,
+                self.additional_pos_embed.weight[:1],
             )[0]
 
         a_hat = self.action_head(hs)
@@ -183,41 +248,65 @@ class DETRVAE(nn.Module):
 
 
 class CNNMLP(nn.Module):
-    def __init__(self, backbones, obs_dim, action_dim, camera_names):
+    def __init__(
+        self,
+        backbones,
+        obs_dim,
+        action_dim,
+        camera_names,
+        position_dim=6,
+        force_dim=3,
+        position_encoder_hidden_dim=128,
+        force_encoder_hidden_dim=64,
+        force_encoder_num_layers=1,
+        force_encoder_dropout=0.0,
+        observation_encoder_activation="gelu",
+        observation_embed_dim=256,
+    ):
         super().__init__()
         self.camera_names = camera_names
-        self.backbones = nn.ModuleList(backbones)
 
-        backbone_down_projs = []
-        for backbone in backbones:
-            down_proj = nn.Sequential(
-                nn.Conv2d(backbone.num_channels, 128, kernel_size=5),
-                nn.Conv2d(128, 64, kernel_size=5),
-                nn.Conv2d(64, 32, kernel_size=5),
-            )
-            backbone_down_projs.append(down_proj)
-        self.backbone_down_projs = nn.ModuleList(backbone_down_projs)
+        self.image_encoder = CNNMLPImageEncoder(
+            backbones=backbones,
+            camera_names=camera_names,
+        )
 
-        mlp_in_dim = 768 * len(backbones) + obs_dim
+        self.observation_encoder = PositionForceObservationEncoder(
+            position_dim=position_dim,
+            force_dim=force_dim,
+            position_hidden_dim=position_encoder_hidden_dim,
+            force_gru_hidden_dim=force_encoder_hidden_dim,
+            force_gru_num_layers=force_encoder_num_layers,
+            force_gru_dropout=force_encoder_dropout,
+            output_dim=observation_embed_dim,
+            activation=observation_encoder_activation,
+        )
+
+        mlp_in_dim = self.image_encoder.output_dim + observation_embed_dim
         self.mlp = mlp(input_dim=mlp_in_dim, hidden_dim=512, output_dim=action_dim, hidden_depth=2)
 
-    def forward(self, qpos, image, env_state=None, actions=None):
+        _ = obs_dim  # kept for backward compatibility
+
+    def forward(
+        self,
+        qpos,
+        image,
+        env_state=None,
+        actions=None,
+        force_history=None,
+    ):
         if qpos.dim() == 3:
             qpos = qpos[:, 0, :]
         if image.dim() == 6:
             image = image[:, 0, ...]
 
-        bs, _ = qpos.shape
-        all_cam_features = []
+        image_embedding = self.image_encoder(image)
+        observation_embedding = self.observation_encoder(
+            qpos=qpos,
+            force_history=force_history,
+        )
 
-        for cam_id, cam_name in enumerate(self.camera_names):
-            features, _ = self.backbones[cam_id](image[:, cam_id])
-            features = features[0]
-            cam_feat = self.backbone_down_projs[cam_id](features)
-            all_cam_features.append(cam_feat.reshape([bs, -1]))
-
-        flattened = torch.cat(all_cam_features, dim=1)
-        features = torch.cat([flattened, qpos], dim=1)
+        features = torch.cat([image_embedding, observation_embedding], dim=1)
         return self.mlp(features)
 
 
@@ -266,6 +355,13 @@ def build_ACT_model(args):
         action_dim=action_dim,
         num_queries=args.num_queries,
         camera_names=args.camera_names,
+        position_dim=getattr(args, "position_dim", 6),
+        force_dim=getattr(args, "force_dim", 3),
+        position_encoder_hidden_dim=getattr(args, "position_encoder_hidden_dim", 128),
+        force_encoder_hidden_dim=getattr(args, "force_encoder_hidden_dim", 64),
+        force_encoder_num_layers=getattr(args, "force_encoder_num_layers", 1),
+        force_encoder_dropout=getattr(args, "force_encoder_dropout", 0.0),
+        observation_encoder_activation=getattr(args, "observation_encoder_activation", "gelu"),
     )
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("number of parameters: %.2fM" % (n_params / 1e6,))
@@ -282,6 +378,14 @@ def build_CNNMLP_model(args):
         obs_dim=obs_dim,
         action_dim=action_dim,
         camera_names=args.camera_names,
+        position_dim=getattr(args, "position_dim", 6),
+        force_dim=getattr(args, "force_dim", 3),
+        position_encoder_hidden_dim=getattr(args, "position_encoder_hidden_dim", 128),
+        force_encoder_hidden_dim=getattr(args, "force_encoder_hidden_dim", 64),
+        force_encoder_num_layers=getattr(args, "force_encoder_num_layers", 1),
+        force_encoder_dropout=getattr(args, "force_encoder_dropout", 0.0),
+        observation_encoder_activation=getattr(args, "observation_encoder_activation", "gelu"),
+        observation_embed_dim=getattr(args, "cnnmlp_observation_embed_dim", 256),
     )
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("number of parameters: %.2fM" % (n_params / 1e6,))

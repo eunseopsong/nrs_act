@@ -28,7 +28,7 @@ class ACTPolicy(nn.Module):
 
         print(f"[ACTPolicy] KL Weight = {self.kl_weight}")
 
-    def forward(self, qpos, image, actions=None, is_pad=None):
+    def forward(self, qpos, image, actions=None, is_pad=None, force_history=None):
         env_state = None
         image = self._normalize(image)
 
@@ -37,11 +37,12 @@ class ACTPolicy(nn.Module):
             is_pad = is_pad[:, : self.model.num_queries]
 
             a_hat, is_pad_hat, (mu, logvar) = self.model(
-                qpos,
-                image,
-                env_state,
-                actions,
-                is_pad,
+                qpos=qpos,
+                image=image,
+                env_state=env_state,
+                actions=actions,
+                is_pad=is_pad,
+                force_history=force_history,
             )
 
             total_kld, _, _ = kl_divergence(mu, logvar)
@@ -59,7 +60,12 @@ class ACTPolicy(nn.Module):
             loss_dict["loss"] = loss_dict["l1"] + self.kl_weight * loss_dict["kl"]
             return loss_dict
 
-        a_hat, _, _ = self.model(qpos, image, env_state)
+        a_hat, _, _ = self.model(
+            qpos=qpos,
+            image=image,
+            env_state=env_state,
+            force_history=force_history,
+        )
         return a_hat
 
     def configure_optimizers(self):
@@ -80,17 +86,28 @@ class CNNMLPPolicy(nn.Module):
             std=[0.229, 0.224, 0.225],
         )
 
-    def forward(self, qpos, image, actions=None, is_pad=None):
+    def forward(self, qpos, image, actions=None, is_pad=None, force_history=None):
         env_state = None
         image = self._normalize(image)
 
         if actions is not None:
             actions = actions[:, 0]
-            a_hat = self.model(qpos, image, env_state, actions)
+            a_hat = self.model(
+                qpos=qpos,
+                image=image,
+                env_state=env_state,
+                actions=actions,
+                force_history=force_history,
+            )
             mse = F.mse_loss(actions, a_hat)
             return {"mse": mse, "loss": mse}
 
-        a_hat = self.model(qpos, image, env_state)
+        a_hat = self.model(
+            qpos=qpos,
+            image=image,
+            env_state=env_state,
+            force_history=force_history,
+        )
         return a_hat
 
     def configure_optimizers(self):
