@@ -2,138 +2,305 @@
 # -*- coding: utf-8 -*-
 
 import os
-from copy import deepcopy
+from contextlib import nullcontext
+from typing import Dict, List, Tuple, Optional
 
 import torch
 from tqdm import tqdm
 
-from common.utils import compute_dict_mean, set_seed
+from common.utils import set_seed
 from models.policy import ACTPolicy, CNNMLPPolicy
-from training.debug import debug_norm_once, make_grad_scaler, autocast_context
-from training.plotting import plot_history
+
+try:
+    from training.plotting import plot_history
+except Exception:
+    plot_history = None
 
 
-def make_policy(policy_class: str, policy_config: dict):
+def _autocast_context(enabled: bool, device: torch.device):
+    if not enabled:
+        return nullcontext()
+
+    device_type = "cuda" if str(device).startswith("cuda") else "cpu"
+    if device_type == "cuda":
+        return torch.cuda.amp.autocast(enabled=True)
+    return nullcontext()
+
+
+def _make_grad_scaler(enabled: bool):
+    if enabled and torch.cuda.is_available():
+        return torch.cuda.amp.GradScaler(enabled=True)
+    return None
+
+
+def _scalarize_loss_dict(loss_dict: Dict[str, torch.Tensor]) -> Dict[str, float]:
+    out = {}
+    for k, v in loss_dict.items():
+        if torch.is_tensor(v):
+            out[k] = float(v.detach().cpu().item())
+        else:
+            out[k] = float(v)
+    return out
+
+
+def _mean_dict(dicts: List[Dict[str, float]]) -> Dict[str, float]:
+    if len(dicts) == 0:
+        return {}
+
+    keys = dicts[0].keys()
+    out = {}
+    for k in keys:
+        out[k] = sum(d[k] for d in dicts) / len(dicts)
+    return out
+
+
+def make_policy(policy_class: str, policy_config: Dict):
+    policy_class = str(policy_class).upper()
+
     if policy_class == "ACT":
         return ACTPolicy(policy_config)
-    elif policy_class == "CNNMLP":
+    if policy_class == "CNNMLP":
         return CNNMLPPolicy(policy_config)
+
+    raise ValueError(f"Unsupported policy_class: {policy_class}")
+
+
+def _unpack_batch(batch, device: torch.device):
+    """
+    Supports both:
+      1) image, qpos, action, is_pad
+      2) image, qpos, action, is_pad, force_history
+    """
+    if not isinstance(batch, (list, tuple)):
+        raise TypeError(f"batch must be tuple/list, got {type(batch)}")
+
+    if len(batch) == 4:
+        image, qpos, action, is_pad = batch
+        force_history = None
+    elif len(batch) == 5:
+        image, qpos, action, is_pad, force_history = batch
     else:
-        raise NotImplementedError(policy_class)
+        raise ValueError(f"Unexpected batch length: {len(batch)}")
 
-
-def forward_pass(batch, policy, device):
-    image, qpos, action, is_pad = batch
     image = image.to(device, non_blocking=True)
     qpos = qpos.to(device, non_blocking=True)
     action = action.to(device, non_blocking=True)
     is_pad = is_pad.to(device, non_blocking=True)
-    return policy(qpos, image, action, is_pad)
+
+    if force_history is not None:
+        force_history = force_history.to(device, non_blocking=True)
+
+    return image, qpos, action, is_pad, force_history
 
 
-def train_bc(train_dataloader, val_dataloader, config):
-    num_epochs = config["num_epochs"]
-    ckpt_dir = config["ckpt_dir"]
-    seed = config["seed"]
+def forward_pass(batch, policy, device):
+    image, qpos, action, is_pad, force_history = _unpack_batch(batch, device)
+
+    if force_history is None:
+        return policy(qpos, image, action, is_pad)
+
+    return policy(
+        qpos,
+        image,
+        action,
+        is_pad,
+        force_history=force_history,
+    )
+
+
+@torch.no_grad()
+def _run_validation(
+    val_loader,
+    policy,
+    device,
+    amp_enabled: bool = False,
+) -> Dict[str, float]:
+    policy.eval()
+    val_dicts = []
+
+    for batch in val_loader:
+        with _autocast_context(amp_enabled, device):
+            out = forward_pass(batch, policy, device)
+        val_dicts.append(_scalarize_loss_dict(out))
+
+    return _mean_dict(val_dicts)
+
+
+def _save_checkpoint(
+    ckpt_path: str,
+    epoch: int,
+    policy,
+    optimizer,
+    train_summary: Optional[Dict[str, float]],
+    val_summary: Optional[Dict[str, float]],
+    config: Dict,
+):
+    payload = {
+        "epoch": int(epoch),
+        "model_state_dict": policy.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "train_summary": train_summary,
+        "val_summary": val_summary,
+        "config": config,
+    }
+    torch.save(payload, ckpt_path)
+
+
+def train_bc(train_loader, val_loader, config):
+    """
+    Expected config keys (backward-compatible):
+      - device
+      - seed
+      - policy_class
+      - policy_config
+      - num_epochs
+      - ckpt_dir
+      - amp (optional)
+      - debug_batches (optional, default=3)
+      - save_every (optional, default=0)
+    """
+    device = config["device"]
+    seed = int(config.get("seed", 0))
     policy_class = config["policy_class"]
     policy_config = config["policy_config"]
-    device = config["device"]
-    use_amp = config["amp"]
-    debug_norm = config.get("debug_norm", False)
-    debug_norm_batches = int(config.get("debug_norm_batches", 1))
+    num_epochs = int(config["num_epochs"])
+    ckpt_dir = config["ckpt_dir"]
 
+    amp_enabled = bool(config.get("amp", False))
+    debug_batches = int(config.get("debug_batches", 3))
+    save_every = int(config.get("save_every", 0))
+
+    os.makedirs(ckpt_dir, exist_ok=True)
     set_seed(seed)
-
-    torch.backends.cudnn.benchmark = True
-    if torch.cuda.is_available():
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-
-    if debug_norm:
-        print("[INFO] debug_norm enabled: printing post-normalization stats for TRAIN and VAL.")
-        try:
-            debug_norm_once(train_dataloader, tag="TRAIN", max_batches=debug_norm_batches)
-        except Exception as e:
-            print(f"[WARN] NORM-DEBUG/TRAIN failed: {e}")
-        try:
-            debug_norm_once(val_dataloader, tag="VAL", max_batches=debug_norm_batches)
-        except Exception as e:
-            print(f"[WARN] NORM-DEBUG/VAL failed: {e}")
 
     policy = make_policy(policy_class, policy_config).to(device)
     optimizer = policy.configure_optimizers()
-    scaler = make_grad_scaler(use_amp, device)
-
-    train_history, validation_history = [], []
-    min_val_loss = float("inf")
-    best_ckpt_info = None
+    scaler = _make_grad_scaler(amp_enabled)
 
     n_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
-    print(f"[DEBUG] Policy class = {policy_class}, trainable params = {n_params/1e6:.2f}M")
+    print(f"[DEBUG] Policy class = {policy_class}, trainable params = {n_params / 1e6:.2f}M")
 
-    for epoch in tqdm(range(num_epochs)):
-        print(f"\nEpoch {epoch}")
+    best_val_loss = float("inf")
+    best_epoch = -1
+    best_ckpt_path = os.path.join(ckpt_dir, "policy_best.ckpt")
+    last_ckpt_path = os.path.join(ckpt_dir, "policy_last.ckpt")
 
-        # ---------------- Validation ----------------
-        with torch.inference_mode():
-            policy.eval()
-            epoch_dicts = []
-            for batch in val_dataloader:
-                with autocast_context(use_amp, device):
-                    out = forward_pass(batch, policy, device)
-                epoch_dicts.append({k: out[k].detach().float().cpu() for k in out})
+    history = {
+        "train": [],
+        "val": [],
+    }
 
-            epoch_summary = compute_dict_mean(epoch_dicts)
-            epoch_summary = {k: float(epoch_summary[k]) for k in epoch_summary}
-            validation_history.append(epoch_summary)
+    epoch_pbar = tqdm(range(num_epochs))
 
-            epoch_val_loss = epoch_summary["loss"]
-            print("Val:", " | ".join([f"{k}:{epoch_summary[k]:.6f}" for k in epoch_summary]))
+    for epoch in epoch_pbar:
+        print(f"Epoch {epoch}")
 
-            if epoch_val_loss < min_val_loss:
-                min_val_loss = epoch_val_loss
-                if policy_class == "ACT":
-                    best_state = deepcopy(policy.model.state_dict())
-                else:
-                    best_state = deepcopy(policy.state_dict())
-                best_ckpt_info = (epoch, min_val_loss, best_state)
+        # --------------------------------------------------
+        # Validation first (keeps current logging style)
+        # --------------------------------------------------
+        val_summary = _run_validation(
+            val_loader=val_loader,
+            policy=policy,
+            device=device,
+            amp_enabled=amp_enabled,
+        )
+        history["val"].append({"epoch": epoch, **val_summary})
 
-        # ---------------- Training ----------------
+        if len(val_summary) > 0:
+            val_msg = " | ".join(f"{k}:{v:.6f}" for k, v in sorted(val_summary.items()))
+            print(f"Val: {val_msg}")
+
+            current_val_loss = val_summary.get("loss", None)
+            if current_val_loss is not None and current_val_loss < best_val_loss:
+                best_val_loss = float(current_val_loss)
+                best_epoch = int(epoch)
+                _save_checkpoint(
+                    ckpt_path=best_ckpt_path,
+                    epoch=epoch,
+                    policy=policy,
+                    optimizer=optimizer,
+                    train_summary=None,
+                    val_summary=val_summary,
+                    config=config,
+                )
+
+        # --------------------------------------------------
+        # Train
+        # --------------------------------------------------
         policy.train()
-        optimizer.zero_grad(set_to_none=True)
+        train_dicts = []
 
-        batch_dicts = []
-        for batch_idx, batch in enumerate(train_dataloader):
-            with autocast_context(use_amp, device):
-                forward_dict = forward_pass(batch, policy, device)
-                loss = forward_dict["loss"]
-
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+        for batch_idx, batch in enumerate(train_loader):
             optimizer.zero_grad(set_to_none=True)
 
-            batch_dicts.append({k: forward_dict[k].detach().float().cpu() for k in forward_dict})
+            with _autocast_context(amp_enabled, device):
+                out = forward_pass(batch, policy, device)
+                loss = out["loss"]
 
-            if epoch == 0 and batch_idx < 3:
-                print(f"[DEBUG] Epoch 0, batch {batch_idx}, train loss = {float(loss):.6f}")
-
-        epoch_train_summary = compute_dict_mean(batch_dicts)
-        epoch_train_summary = {k: float(epoch_train_summary[k]) for k in epoch_train_summary}
-        train_history.append(epoch_train_summary)
-        print("Train:", " | ".join([f"{k}:{epoch_train_summary[k]:.6f}" for k in epoch_train_summary]))
-
-        if epoch % 100 == 0:
-            ckpt_path = os.path.join(ckpt_dir, f"policy_epoch_{epoch}_seed_{seed}.ckpt")
-            if policy_class == "ACT":
-                state_to_save = policy.model.state_dict()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
             else:
-                state_to_save = policy.state_dict()
+                loss.backward()
+                optimizer.step()
 
-            torch.save(state_to_save, ckpt_path)
-            print(f"[INFO] Saved intermediate ckpt -> {ckpt_path}")
-            plot_history(train_history, validation_history, epoch + 1, ckpt_dir, seed)
+            scalar_out = _scalarize_loss_dict(out)
+            train_dicts.append(scalar_out)
 
-    best_epoch, best_loss, best_state_dict = best_ckpt_info
-    print(f"[INFO] Best epoch = {best_epoch}, min val loss = {best_loss:.6f}")
+            if batch_idx < debug_batches:
+                print(
+                    f"[DEBUG] Epoch {epoch}, batch {batch_idx}, train loss = {scalar_out['loss']:.6f}"
+                )
+
+        train_summary = _mean_dict(train_dicts)
+        history["train"].append({"epoch": epoch, **train_summary})
+
+        # save periodic checkpoint
+        if save_every > 0 and ((epoch + 1) % save_every == 0):
+            periodic_ckpt = os.path.join(ckpt_dir, f"policy_epoch_{epoch:04d}.ckpt")
+            _save_checkpoint(
+                ckpt_path=periodic_ckpt,
+                epoch=epoch,
+                policy=policy,
+                optimizer=optimizer,
+                train_summary=train_summary,
+                val_summary=val_summary,
+                config=config,
+            )
+
+        # update tqdm postfix
+        postfix = {}
+        if "loss" in train_summary:
+            postfix["train_loss"] = f"{train_summary['loss']:.4f}"
+        if "loss" in val_summary:
+            postfix["val_loss"] = f"{val_summary['loss']:.4f}"
+        if len(postfix) > 0:
+            epoch_pbar.set_postfix(postfix)
+
+        # save last checkpoint every epoch
+        _save_checkpoint(
+            ckpt_path=last_ckpt_path,
+            epoch=epoch,
+            policy=policy,
+            optimizer=optimizer,
+            train_summary=train_summary,
+            val_summary=val_summary,
+            config=config,
+        )
+
+    # optional history plot
+    if plot_history is not None:
+        try:
+            plot_history(history, ckpt_dir)
+        except Exception as e:
+            print(f"[WARN] plot_history failed: {e}")
+
+    best_ckpt_info = {
+        "best_epoch": best_epoch,
+        "best_val_loss": best_val_loss,
+        "best_ckpt_path": best_ckpt_path,
+        "last_ckpt_path": last_ckpt_path,
+        "history": history,
+    }
     return best_ckpt_info

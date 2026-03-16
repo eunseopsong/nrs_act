@@ -73,4 +73,4 @@ def denormalize_action(action_norm: np.ndarray, stats: Dict[str, np.ndarray]) ->
 
     mu = stats["action_mean"].reshape((1,) * (action_norm.ndim - 1) + (9,))
     sd = stats["action_std"].reshape((1,) * (action_norm.ndim - 1) + (9,))
-    return action_norm * sd + mu
+    return action_norm * sd + mus
