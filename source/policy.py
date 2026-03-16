@@ -1,20 +1,21 @@
-import sys, os
+import os
+import sys
 import torch.nn as nn
 from torch.nn import functional as F
 import torchvision.transforms as transforms
 
-# -----------------------------
-# 경로 보정: detr가 nrs_act/act/detr 에 있을 때 자동 인식되도록 추가
-# -----------------------------
-current_dir = os.path.dirname(__file__)
-act_dir = os.path.join(current_dir, "act")
-detr_dir = os.path.join(act_dir, "detr")
 
-for path in [act_dir, detr_dir]:
-    if path not in sys.path:
-        sys.path.append(path)
+# -----------------------------
+# source/act/detr 경로 보정
+# policy.py 하나만 사용하도록 유지
+# -----------------------------
+_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+_ACT_DIR = os.path.join(_CURRENT_DIR, "act")
+_DETR_PARENT = _ACT_DIR  # contains package folder: detr/
 
-# detr import (경로 보정 이후 시도)
+if _DETR_PARENT not in sys.path:
+    sys.path.insert(0, _DETR_PARENT)
+
 try:
     from detr.main import (
         build_ACT_model_and_optimizer,
@@ -22,15 +23,11 @@ try:
     )
 except ImportError as e:
     raise ImportError(
-        f"[policy.py] 'detr' 패키지를 찾을 수 없습니다.\n"
-        f"현재 경로: {os.getcwd()}\n"
-        f"시도된 경로: {detr_dir}\n"
-        f"해결 방법: 'act/detr' 폴더가 존재하는지 확인하거나, PYTHONPATH에 추가하세요.\n"
+        f"[source/policy.py] 'detr' 패키지를 찾을 수 없습니다.\n"
+        f"현재 작업 디렉터리: {os.getcwd()}\n"
+        f"기대한 경로: {_DETR_PARENT}\n"
         f"원래 에러: {e}"
     )
-
-import IPython
-e = IPython.embed
 
 
 class ACTPolicy(nn.Module):
@@ -42,18 +39,19 @@ class ACTPolicy(nn.Module):
         self.model = model
         self.optimizer = optimizer
         self.kl_weight = args_override["kl_weight"]
-        print(f"[ACTPolicy] KL Weight = {self.kl_weight}")
 
         self._normalize = transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225],
         )
 
-    def __call__(self, qpos, image, actions=None, is_pad=None):
+        print(f"[ACTPolicy] KL Weight = {self.kl_weight}")
+
+    def forward(self, qpos, image, actions=None, is_pad=None):
         env_state = None
         image = self._normalize(image)
 
-        # 학습 모드
+        # training
         if actions is not None:
             actions = actions[:, : self.model.num_queries]
             is_pad = is_pad[:, : self.model.num_queries]
@@ -63,17 +61,24 @@ class ACTPolicy(nn.Module):
             )
 
             total_kld, _, _ = kl_divergence(mu, logvar)
-            all_l1 = F.l1_loss(actions, a_hat, reduction="none")
-            l1 = (all_l1 * ~is_pad.unsqueeze(-1)).mean()
 
-            loss_dict = {"l1": l1, "kl": total_kld[0]}
+            all_l1 = F.l1_loss(actions, a_hat, reduction="none")   # (B,T,D)
+            valid_mask = (~is_pad).unsqueeze(-1).float()           # (B,T,1)
+
+            # padded timesteps 제외한 평균
+            valid_count = valid_mask.sum().clamp_min(1.0) * actions.shape[-1]
+            l1 = (all_l1 * valid_mask).sum() / valid_count
+
+            loss_dict = {
+                "l1": l1,
+                "kl": total_kld[0],
+            }
             loss_dict["loss"] = loss_dict["l1"] + self.kl_weight * loss_dict["kl"]
             return loss_dict
 
-        # 추론 모드
-        else:
-            a_hat, _, _ = self.model(qpos, image, env_state)
-            return a_hat
+        # inference
+        a_hat, _, _ = self.model(qpos, image, env_state)
+        return a_hat
 
     def configure_optimizers(self):
         return self.optimizer
@@ -87,12 +92,13 @@ class CNNMLPPolicy(nn.Module):
         model, optimizer = build_CNNMLP_model_and_optimizer(args_override)
         self.model = model
         self.optimizer = optimizer
+
         self._normalize = transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225],
         )
 
-    def __call__(self, qpos, image, actions=None, is_pad=None):
+    def forward(self, qpos, image, actions=None, is_pad=None):
         env_state = None
         image = self._normalize(image)
 
@@ -101,9 +107,9 @@ class CNNMLPPolicy(nn.Module):
             a_hat = self.model(qpos, image, env_state, actions)
             mse = F.mse_loss(actions, a_hat)
             return {"mse": mse, "loss": mse}
-        else:
-            a_hat = self.model(qpos, image, env_state)
-            return a_hat
+
+        a_hat = self.model(qpos, image, env_state)
+        return a_hat
 
     def configure_optimizers(self):
         return self.optimizer
@@ -113,6 +119,7 @@ def kl_divergence(mu, logvar):
     """ACT에서 사용하는 KL 계산"""
     batch_size = mu.size(0)
     assert batch_size != 0
+
     if mu.data.ndimension() == 4:
         mu = mu.view(mu.size(0), mu.size(1))
     if logvar.data.ndimension() == 4:

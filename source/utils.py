@@ -4,7 +4,7 @@
 import os
 import glob
 import random
-from typing import List, Dict, Tuple, Optional
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -13,39 +13,68 @@ import h5py
 
 
 # -----------------------------
-# Basic utils (used by training script)
+# Basic utils
 # -----------------------------
-def set_seed(seed: int):
+def set_seed(seed: int) -> None:
+    """
+    Set seeds for reproducibility.
+    Keep behavior lightweight (do not force cudnn deterministic here).
+    """
+    seed = int(seed)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
 
-def compute_dict_mean(dicts: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+def detach_dict(d: Dict[str, Any]) -> Dict[str, Any]:
     """
-    dicts: list of dict(key -> tensor/float)
-    return: dict(key -> mean tensor)
+    Detach all tensor values (shallow).
     """
-    if len(dicts) == 0:
+    out = {}
+    for k, v in d.items():
+        if torch.is_tensor(v):
+            out[k] = v.detach()
+        else:
+            out[k] = v
+    return out
+
+
+def compute_dict_mean(dict_list: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+    """
+    Compute mean over a list of metric dicts.
+    Values can be torch tensors or floats/ints.
+    Returns torch tensors on CPU.
+    """
+    if len(dict_list) == 0:
         return {}
 
-    keys = dicts[0].keys()
-    out = {}
-    for k in keys:
+    keys = set()
+    for d in dict_list:
+        keys.update(d.keys())
+
+    out: Dict[str, torch.Tensor] = {}
+    for k in sorted(keys):
         vals = []
-        for d in dicts:
+        for d in dict_list:
             if k not in d:
                 continue
+
             v = d[k]
-            if isinstance(v, (float, int)):
-                v = torch.tensor(float(v))
-            elif not torch.is_tensor(v):
-                v = torch.tensor(float(v))
-            vals.append(v.float())
+            if torch.is_tensor(v):
+                v = v.detach().float().cpu()
+                if v.numel() != 1:
+                    v = v.mean()
+            else:
+                v = torch.tensor(float(v), dtype=torch.float32)
+
+            vals.append(v)
+
         if len(vals) == 0:
             continue
-        out[k] = torch.stack(vals, dim=0).mean(dim=0)
+
+        out[k] = torch.stack(vals).mean()
+
     return out
 
 
@@ -60,10 +89,12 @@ def _get_valid_len(is_pad: np.ndarray) -> int:
 def _resolve_cam_key(img_grp: h5py.Group, requested: str) -> str:
     if requested in img_grp:
         return requested
+
     fallback = {"cam_top": "cam_front", "cam_ee": "cam_head"}
     alt = fallback.get(requested, None)
     if alt is not None and alt in img_grp:
         return alt
+
     keys = list(img_grp.keys())
     if len(keys) == 0:
         raise KeyError("No image datasets under /observations/images")
@@ -121,13 +152,11 @@ def compute_norm_stats_all(episode_files: List[str]) -> Dict[str, np.ndarray]:
                 a_max = np.maximum(a_max, av_max)
 
     if q_min is None:
-        # fallback
         q_min = np.zeros((9,), dtype=np.float32)
         q_max = np.ones((9,), dtype=np.float32)
         a_min = np.zeros((9,), dtype=np.float32)
         a_max = np.ones((9,), dtype=np.float32)
 
-    # avoid zero range
     eps = 1e-6
     q_rng = np.maximum(q_max - q_min, eps)
     a_rng = np.maximum(a_max - a_min, eps)
@@ -175,14 +204,17 @@ class EpisodicStartDataset(Dataset):
       __len__ = num_episodes * samples_per_episode
       -> restores "many iterations per epoch"
     """
-    def __init__(self,
-                 episode_files: List[str],
-                 camera_names: List[str],
-                 norm_stats: Dict[str, np.ndarray],
-                 seq_len: int,
-                 samples_per_episode: int = 50,
-                 seed: int = 0,
-                 is_sim: bool = False):
+
+    def __init__(
+        self,
+        episode_files: List[str],
+        camera_names: List[str],
+        norm_stats: Dict[str, np.ndarray],
+        seq_len: int,
+        samples_per_episode: int = 50,
+        seed: int = 0,
+        is_sim: bool = False,
+    ):
         self.files = list(episode_files)
         self.camera_names = list(camera_names)
         self.seq_len = int(seq_len)
@@ -190,7 +222,6 @@ class EpisodicStartDataset(Dataset):
         self.seed = int(seed)
         self.is_sim = bool(is_sim)
 
-        # stats to torch (min/max)
         self.q_min = torch.tensor(norm_stats["qpos_min"], dtype=torch.float32)
         self.q_max = torch.tensor(norm_stats["qpos_max"], dtype=torch.float32)
         self.a_min = torch.tensor(norm_stats["action_min"], dtype=torch.float32)
@@ -200,9 +231,7 @@ class EpisodicStartDataset(Dataset):
         self.q_den = torch.clamp(self.q_max - self.q_min, min=eps)
         self.a_den = torch.clamp(self.a_max - self.a_min, min=eps)
 
-        # rng for single-worker
         self._rng = np.random.RandomState(self.seed)
-        # per-worker rng
         self._worker_rng = {}
 
     def __len__(self):
@@ -212,6 +241,7 @@ class EpisodicStartDataset(Dataset):
         wi = torch.utils.data.get_worker_info()
         if wi is None:
             return self._rng
+
         wid = wi.id
         if wid not in self._worker_rng:
             self._worker_rng[wid] = np.random.RandomState(self.seed + 10007 * (wid + 1))
@@ -232,9 +262,9 @@ class EpisodicStartDataset(Dataset):
             a_start = start_ts if self.is_sim else max(0, start_ts - 1)
 
             # qpos(9) = pos6 + force3
-            pos = np.asarray(h["/observations/position"][start_ts], dtype=np.float32)  # (6,)
-            frc = np.asarray(h["/observations/force"][start_ts], dtype=np.float32)     # (3,)
-            qpos = np.concatenate([pos, frc], axis=-1).astype(np.float32)              # (9,)
+            pos = np.asarray(h["/observations/position"][start_ts], dtype=np.float32)
+            frc = np.asarray(h["/observations/force"][start_ts], dtype=np.float32)
+            qpos = np.concatenate([pos, frc], axis=-1).astype(np.float32)
 
             # images at start_ts only (KEEP multi-cam: (K,3,H,W))
             img_grp = h["/observations/images"]
@@ -247,36 +277,32 @@ class EpisodicStartDataset(Dataset):
             cam_imgs = np.stack(cam_imgs, axis=0)  # (K,3,H,W)
 
             # action full (T,9)
-            a_pos_full = np.asarray(h["/action/position"][()], dtype=np.float32)  # (T,6)
-            a_frc_full = np.asarray(h["/action/force"][()], dtype=np.float32)     # (T,3)
-            act_full = np.concatenate([a_pos_full, a_frc_full], axis=-1).astype(np.float32)  # (T,9)
+            a_pos_full = np.asarray(h["/action/position"][()], dtype=np.float32)
+            a_frc_full = np.asarray(h["/action/force"][()], dtype=np.float32)
+            act_full = np.concatenate([a_pos_full, a_frc_full], axis=-1).astype(np.float32)
 
             end = min(valid_len, a_start + self.seq_len)
-            seg = act_full[a_start:end]  # (L,9)
+            seg = act_full[a_start:end]
             L = seg.shape[0]
 
-            # pad mask
             is_pad = np.zeros((self.seq_len,), dtype=np.bool_)
             if L < self.seq_len:
                 is_pad[L:] = True
 
-        # to torch
-        image_t = torch.from_numpy(cam_imgs).float() / 255.0  # (K,3,H,W) in [0,1]
-        qpos_t = torch.from_numpy(qpos).float()               # (9,)
+        image_t = torch.from_numpy(cam_imgs).float() / 255.0
+        qpos_t = torch.from_numpy(qpos).float()
 
-        # min-max normalize qpos -> [0,1]
         qpos_t = (qpos_t - self.q_min) / self.q_den
         qpos_t = torch.clamp(qpos_t, 0.0, 1.0)
 
-        # min-max normalize action segment -> [0,1], pad with 0 (== min)
         action_t = torch.zeros((self.seq_len, 9), dtype=torch.float32)
         if L > 0:
-            seg_t = torch.from_numpy(seg).float()  # (L,9)
+            seg_t = torch.from_numpy(seg).float()
             seg_t = (seg_t - self.a_min) / self.a_den
             seg_t = torch.clamp(seg_t, 0.0, 1.0)
             action_t[:L] = seg_t
 
-        pad_t = torch.from_numpy(is_pad).bool()  # (T,)
+        pad_t = torch.from_numpy(is_pad).bool()
 
         return image_t, qpos_t, action_t, pad_t
 
@@ -284,27 +310,28 @@ class EpisodicStartDataset(Dataset):
 # -----------------------------
 # load_data() (KEEP existing episode_*.hdf5 search)
 # -----------------------------
-def load_data(dataset_dir: str,
-              num_episodes: int,
-              camera_names: List[str],
-              batch_size_train: int,
-              batch_size_val: int,
-              seq_len_train: int,
-              seq_len_val: int,
-              seed: int = 0,
-              samples_per_episode: int = 50,
-              num_workers: int = 0,
-              pin_memory: bool = False,
-              persistent_workers: bool = False,
-              prefetch_factor: int = 2,
-              drop_last_train: bool = True) -> Tuple[DataLoader, DataLoader, Dict[str, np.ndarray], Dict]:
+def load_data(
+    dataset_dir: str,
+    num_episodes: int,
+    camera_names: List[str],
+    batch_size_train: int,
+    batch_size_val: int,
+    seq_len_train: int,
+    seq_len_val: int,
+    seed: int = 0,
+    samples_per_episode: int = 50,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    persistent_workers: bool = False,
+    prefetch_factor: int = 2,
+    drop_last_train: bool = True,
+) -> Tuple[DataLoader, DataLoader, Dict[str, np.ndarray], Dict]:
     """
-    Restored load_data() structure:
-      - list episode_*.hdf5 (DIRECT under dataset_dir)
-      - 80/20 split
-      - compute min/max stats
-      - create datasets/loaders
-      - return (train_loader, val_loader, stats, meta)
+    - list episode_*.hdf5 (DIRECT under dataset_dir)
+    - 80/20 split
+    - compute min/max stats
+    - create datasets/loaders
+    - return (train_loader, val_loader, stats, meta)
     """
     ep_files = sorted(glob.glob(os.path.join(dataset_dir, "episode_*.hdf5")))
     if len(ep_files) == 0:
@@ -332,22 +359,28 @@ def load_data(dataset_dir: str,
     train_files = [ep_files[i] for i in perm[:n_train]]
     val_files = [ep_files[i] for i in perm[n_train:]] or train_files[:max(1, len(train_files) // 5)]
 
-    # stats from all files (min/max)
+    # NOTE:
+    # Keep current behavior for compatibility.
+    # If you want stricter evaluation later, change this to train_files only.
     stats = compute_norm_stats_all(train_files + val_files)
 
     train_ds = EpisodicStartDataset(
-        train_files, camera_names, stats,
+        train_files,
+        camera_names,
+        stats,
         seq_len=seq_len_train,
         samples_per_episode=samples_per_episode,
         seed=seed,
-        is_sim=is_sim
+        is_sim=is_sim,
     )
     val_ds = EpisodicStartDataset(
-        val_files, camera_names, stats,
+        val_files,
+        camera_names,
+        stats,
         seq_len=seq_len_val,
         samples_per_episode=max(1, samples_per_episode // 5),
         seed=seed + 123,
-        is_sim=is_sim
+        is_sim=is_sim,
     )
 
     train_loader = DataLoader(
