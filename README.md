@@ -1,74 +1,71 @@
 # nrs_act
 
-Refactored ACT-based imitation learning codebase for robotic polishing and manipulation experiments.
-
-This repository is a **refactored baseline** built from a customized ACT codebase, reorganized so that data, model, training, and common utilities are clearly separated. The current baseline is designed around **9D state/action trajectories + multi-camera RGB observations**, and is intended to make future patches—especially **force/contact-aware learning**—easier to implement and maintain.
+Refactored ACT-based imitation learning codebase for robotic polishing / manipulation experiments.  
+This repository is organized around a modular `source/` layout and now supports a **split observation encoder** with **force history** input.
 
 ---
 
 ## 1. Overview
 
-### Purpose
-`nrs_act` is used for ACT-based imitation learning experiments in robotic manipulation / polishing settings.
+`nrs_act` is an imitation learning project built on a customized ACT codebase and later refactored for maintainability and future research patches.
 
-Current learning setup:
-- **Observation**
-  - pose-like 6D channel: position + orientation
-  - force 3D channel
-  - multi-camera RGB images
-- **Action**
-  - pose-like 6D channel: position + orientation
-  - force 3D channel
+Current baseline characteristics:
+- ACT-based behavior cloning / imitation learning
+- Observation = **position/orientation + force + multi-camera RGB**
+- Action = **position/orientation + force**
+- Modular structure: `common / data / models / training`
+- Main entrypoint kept at `scripts/act/train_act.py`
+- Force-history-aware encoder support added without changing raw `.hdf5` demo files
 
-In the current implementation, the pose-like part is stored in the `position` datasets as **6 dimensions**.
-That is why the current state/action dimension is:
-- `qpos`: 6 (pose-like position/orientation) + 3 (force) = **9D**
-- `action`: 6 (pose-like position/orientation) + 3 (force) = **9D**
-
-### Current baseline status
-- ACT-based imitation learning code has been **fully refactored**.
-- The old monolithic structure has been split into:
-  - `source/common`
-  - `source/data`
-  - `source/models`
-  - `source/training`
-- Training entry is kept as a **single script**:
-  - `scripts/act/train_act.py`
-- Training has been verified to **start normally**.
-- Future patches should **prefer modifying `source/` modules**, while keeping `train_act.py` as stable as possible.
+This project is designed so that future patches can be added mainly under `source/` while keeping `scripts/act/train_act.py` as an orchestration entrypoint.
 
 ---
 
-## 2. Design principles of this refactored baseline
+## 2. Credits / Origin / Upstream
 
-The current codebase follows these rules:
+This repository is **not a from-scratch implementation**. It is a refactored research codebase derived from a customized ACT implementation and upstream ACT/DETR components.
 
-1. **Keep `train_act.py` minimal**
-   - It should mainly handle argument parsing and high-level orchestration.
-   - Training logic, model logic, loss logic, normalization, and dataset behavior should live under `source/`.
+### Original customized ACT codebase
+- **Chemin Ahn**
+- Homepage: `https://chemx3937.github.io/`
+- GitHub: `https://github.com/Chemx3937`
 
-2. **Do not mix responsibilities**
-   - `data/` handles dataset, stats, normalization, and dataloaders.
-   - `models/` handles network definitions and training-facing policy wrappers.
-   - `training/` handles loops, logging, AMP helpers, and plotting.
-   - `common/` handles reusable utilities and path helpers.
+### Upstream references
+1. **ACT: Action Chunking with Transformers**
+   - Tony Z. Zhao
+   - Project page: `https://tonyzhaozh.github.io/aloha/`
 
-3. **Preserve attribution and licenses**
-   - This codebase is a refactored derivative of a customized ACT codebase.
-   - Attribution to the original author and upstream projects must remain.
+2. **DETR**
+   - Facebook Research
+   - GitHub: `https://github.com/facebookresearch/detr`
 
-4. **Make future research patches easier**
-   - Especially patches related to:
-     - force trajectory prediction
-     - non-contact to contact transition
-     - auxiliary contact/phase heads
-     - onset-aware loss reweighting
+### Attribution rule
+When sharing, patching, or redistributing this repository:
+- keep credit to **Chemin Ahn**
+- keep attribution to **ACT**
+- keep attribution to **DETR**
+- do not remove license / attribution files
 
 ---
 
-## 3. Repository structure
+## 3. License
 
-Core repository tree:
+The root `LICENSE` keeps integrated upstream notices.
+
+Included upstream licenses:
+- **ACT**: MIT License  
+  Copyright (c) 2023 Tony Z. Zhao
+- **DETR**: Apache License 2.0  
+  Copyright 2020-present, Facebook, Inc.
+
+Notes:
+- root `LICENSE` must be preserved
+- `README.md` and attribution notes should continue to mention the original customized code origin
+- if new external code is added later, its license notice must also be preserved
+
+---
+
+## 4. Current Project Structure
 
 ```text
 nrs_act/
@@ -97,6 +94,7 @@ nrs_act/
     │   ├── __init__.py
     │   ├── act_core.py
     │   ├── backbone.py
+    │   ├── encoder.py
     │   ├── policy.py
     │   └── transformer.py
     └── training/
@@ -105,419 +103,427 @@ nrs_act/
         └── plotting.py
 ```
 
-Notes:
-- Old shim-style structure has been removed.
-- Legacy paths like `source/policy.py`, `source/utils.py`, `source/act_train_utils.py`, or `source/act/` are no longer the active structure.
-- `__pycache__` directories can be ignored.
+### Key idea of the refactor
+Previous monolithic logic was split by responsibility:
+- `data/` → dataset / normalization / dataloader
+- `models/` → ACT core / policy / encoder / backbone / transformer
+- `training/` → train loop / debug / plotting
+- `common/` → general shared utilities
 
 ---
 
-## 4. What each top-level folder does
+## 5. What Each Folder Does
 
-### `checkpoints/`
-Stores training outputs such as:
-- timestamped checkpoint folders
-- model weights
-- dataset statistics (for example `dataset_stats.pkl`)
-- training history / plots depending on the configuration
+### `scripts/act/`
+Training / evaluation entrypoint.
 
-Typical usage:
-- one task-specific directory under `checkpoints/`
-- then one timestamped run directory per training run
+Main file:
+- `train_act.py`
+
+Responsibilities:
+- parse CLI arguments
+- assemble policy config
+- call `load_data(...)`
+- call `train_bc(...)`
+- handle evaluation mode
+- save checkpoint directory and dataset stats
+
+Design rule:
+- keep this file as thin as possible
+- future algorithmic patches should mostly go into `source/`
+
+---
+
+### `source/common/`
+General utilities.
+
+Files:
+- `fs.py` → checkpoint folder lookup helpers such as latest timestamped subdir search
+- `utils.py` → common helpers like seeding and dictionary utilities
+
+---
+
+### `source/data/`
+Dataset and dataloader logic.
+
+Files:
+- `dataset.py`
+- `loader.py`
+- `normalization.py`
+
+Responsibilities:
+- read `episode_*.hdf5`
+- sample episode start timesteps
+- build current observation and action chunk
+- normalize qpos/action with per-dimension min-max
+- optionally build **force history** on-the-fly from raw episode force trajectory
+- create train / val `DataLoader`
+
+This folder is the main patch point for:
+- contact labels
+- phase labels
+- onset weighting
+- previous-action history
+- force-history generation
+- normalization changes
+
+---
+
+### `source/models/`
+Model definition and wrappers.
+
+Files:
+- `encoder.py` → **new split observation encoders**
+- `act_core.py` → ACT / CNNMLP core model builders
+- `backbone.py` → CNN image backbone + positional encoding
+- `transformer.py` → transformer encoder/decoder
+- `policy.py` → training-facing policy wrapper and losses
+- `__init__.py` → package import convenience
+
+This folder is the main patch point for:
+- encoder changes
+- auxiliary heads
+- force/contact prediction heads
+- loss weighting
+- fusion changes
+- model architecture extensions
+
+---
+
+### `source/training/`
+Training loop and debugging.
+
+Files:
+- `engine.py` → training / validation loop
+- `debug.py` → normalization debug and AMP helpers
+- `plotting.py` → training history plotting
+
+Responsibilities:
+- batch forward pass
+- support 4-item and 5-item batch formats
+- validation / checkpoint save
+- normalization debug print
+- optional AMP handling
+
+---
+
+### `source/custom/`
+Custom environment / task-specific helpers kept from the original research workflow.
+
+This includes optional task config or hardware/environment support code used around the ACT project.
+
+---
+
+## 6. Observation / Action Definition
+
+### Current action definition
+The model still predicts the same 9D action as before:
+
+\[
+a_t = [x, y, z, w_x, w_y, w_z, f_x, f_y, f_z]
+\]
+
+So **the action space has not changed**.
+
+### Current observation definition
+The current observation remains based on:
+- pose/orientation: `x y z wx wy wz`
+- force: `fx fy fz`
+- multi-camera RGB images
+
+What changed is **how the observation is encoded**.
+
+---
+
+## 7. Old Encoder Structure vs New Encoder Structure
+
+## Before
+A single shared state encoder processed the current 9D state directly:
+
+\[
+q_t = [x,y,z,w_x,w_y,w_z,f_x,f_y,f_z]
+\]
+
+\[
+e_t = \phi_{shared}(q_t)
+\]
+
+Characteristics:
+- position/orientation and force were mixed immediately
+- force used only the current timestep
+- no temporal force context
+
+---
+
+## After
+The observation is now encoded in a split manner.
+
+### 1) Position encoder
+Current pose/orientation is encoded separately:
+
+\[
+p_t = [x,y,z,w_x,w_y,w_z]
+\]
+
+\[
+e_t^{pos} = \phi_{pos}(p_t)
+\]
+
+### 2) Force encoder (GRU)
+A short force history window is encoded:
+
+\[
+H_t = [f_{t-L+1}, \dots, f_t], \quad f_t = [f_x,f_y,f_z]
+\]
+
+\[
+e_t^{force} = \phi_{force}(H_t)
+\]
+
+Here `phi_force` is a **GRU-based force-history encoder**.
+
+### 3) Fusion encoder
+Position and force embeddings are fused into one observation embedding:
+
+\[
+e_t = \phi_{fuse}([e_t^{pos}; e_t^{force}])
+\]
+
+### 4) Image encoder
+RGB observations are encoded by the image backbone:
+
+\[
+e_t^{img} = \phi_{img}(I_t)
+\]
+
+These are then used by ACT / CNNMLP policy logic.
+
+---
+
+## 8. Why the New Structure Matters
+
+The new structure improves the state representation in two ways.
+
+### A. Position / force disentangling
+Before, pose and force were forced into the same encoder.  
+Now they are represented separately first, which reduces early entanglement.
+
+### B. Temporal force modeling
+Before, the model only saw current force:
+
+\[
+f_t
+\]
+
+Now it can see force trend:
+
+\[
+f_{t-L+1}, \dots, f_t
+\]
+
+This is especially important for:
+- non-contact → contact transition
+- pressing phase detection
+- force continuity
+- contact-aware action generation
+
+---
+
+## 9. Force History: How It Is Added Without Changing Raw `.hdf5`
+
+Raw demo files are **not rewritten**.
+
+Instead, `source/data/dataset.py` builds force history on-the-fly from the episode’s full force trajectory.
+
+If the current sampled timestep is `t`, dataset constructs:
+
+\[
+H_t = [f_{t-L+1}, \dots, f_t]
+\]
+
+using `/observations/force` inside the same episode file.
+
+### Episode start padding
+If `t < L-1`, the left side is padded by repeating the first available force value.
 
 Example:
 
+\[
+[f_0, f_0, \dots, f_0, f_1, \dots, f_t]
+\]
+
+### Normalization of force history
+`force_history` uses the same min-max statistics as the force part of `qpos`.
+
+So the raw `.hdf5` stays the same, while the dataset becomes history-aware.
+
+---
+
+## 10. Files Changed for the New Force-History Pipeline
+
+### Newly added / important
+- `source/models/encoder.py`
+
+### Main modified files
+- `source/models/act_core.py`
+- `source/models/policy.py`
+- `source/data/dataset.py`
+- `source/data/loader.py`
+- `source/training/engine.py`
+- `source/training/debug.py`
+- `scripts/act/train_act.py`
+
+### Roles of these changes
+- `encoder.py` → position encoder / force GRU encoder / image encoder definitions
+- `dataset.py` → builds `force_history`
+- `loader.py` → enables force-history dataset mode
+- `engine.py` → supports both 4-item and 5-item batches
+- `debug.py` → prints `force_history` stats too
+- `train_act.py` → exposes CLI flags for force history
+
+---
+
+## 11. Encoder Components in `source/models/encoder.py`
+
+### `PositionStateEncoder`
+Encodes:
+
+\[
+[x,y,z,w_x,w_y,w_z]
+\]
+
+into a learned embedding.
+
+### `ForceHistoryGRUEncoder`
+Encodes:
+
+\[
+[f_{t-L+1}, \dots, f_t]
+\]
+
+with a GRU and uses the last hidden state as force embedding.
+
+### `PositionForceFusionEncoder`
+Takes concatenated position and force embeddings and maps them to one fused embedding.
+
+Currently implemented as shallow fusion:
+
+\[
+\text{Linear} + \text{Activation}
+\]
+
+### `ImageObservationEncoder`
+Used for ACT image features.
+
+### `CNNMLPImageEncoder`
+Used for the CNNMLP baseline path.
+
+---
+
+## 12. Current Data Format Assumption
+
+Each dataset directory should contain:
+
 ```text
-checkpoints/
-└── ur10e_swing/
-    └── 20260316_1547/
-        └── dataset_stats.pkl
+episode_0.hdf5
+episode_1.hdf5
+...
 ```
 
----
+Expected keys:
+- `/observations/position`
+- `/observations/force`
+- `/observations/images`
+- `/observations/is_pad`
+- `/action/position`
+- `/action/force`
 
-### `datasets/`
-Stores imitation learning datasets.
+Current dimensionality:
+- observation qpos: `position(6) + force(3) = 9D`
+- action: `position(6) + force(3) = 9D`
+- force history: `(L, 3)` when enabled
 
-Expected format:
-- a dataset directory contains multiple episode files directly:
-  - `episode_0.hdf5`
-  - `episode_1.hdf5`
-  - `episode_2.hdf5`
-  - ...
+Camera names used by default:
+- `cam_top`
+- `cam_ee`
 
-This repository currently assumes ACT-style episodic HDF5 data with multi-camera observations and action trajectories.
-
----
-
-### `scripts/`
-Contains executable entry scripts.
-
-#### `scripts/act/train_act.py`
-This is the **main training / evaluation entrypoint**.
-
-Responsibilities:
-- parse command-line arguments
-- assemble training configuration
-- determine checkpoint and dataset paths
-- call loader / policy / engine modules
-- branch between training and evaluation mode
-
-Important rule:
-- **keep this file as stable as possible**
-- future research changes should usually go into `source/` rather than here
+Fallback mapping:
+- `cam_top -> cam_front`
+- `cam_ee -> cam_head`
 
 ---
 
-### `source/`
-Contains the actual implementation, separated by role.
+## 13. Normalization
 
-Subfolders:
-- `common/`
-- `custom/`
-- `data/`
-- `models/`
-- `training/`
+### qpos / action
+Per-dimension min-max normalization to `[0, 1]`.
 
-This is the main place to modify when extending the project.
+For each dimension independently:
+- x
+- y
+- z
+- wx
+- wy
+- wz
+- fx
+- fy
+- fz
 
----
+### images
+- uint8 → float `[0,1]`
+- ImageNet normalization is still applied inside `source/models/policy.py`
 
-## 5. Detailed explanation of `source/` subfolders
-
-## 5.1 `source/common/`
-Common reusable utilities shared across multiple modules.
-
-### `source/common/fs.py`
-Path and checkpoint helper utilities.
-
-Current known role:
-- find latest timestamped checkpoint/run directory
-
-Current function:
-- `find_latest_timestamped_subdir()`
-
-Use this when:
-- locating the most recent run folder
-- resuming or evaluating latest checkpoints
-- standardizing checkpoint discovery logic
+### force history
+When enabled, `force_history` is normalized using the same min/max used for the force portion of qpos.
 
 ---
 
-### `source/common/utils.py`
-General-purpose helper functions.
+## 14. Training Flow
 
-Current known roles:
-- seed setup
-- dictionary tensor/value processing
-- averaging utilities
-
-Current functions include:
-- `set_seed()`
-- `detach_dict()`
-- `compute_dict_mean()`
-
-Use this when:
-- reproducibility is needed
-- logging detached metrics
-- aggregating loss dictionaries across batches or epochs
-
----
-
-## 5.2 `source/custom/`
-Custom environment- or project-specific helper code.
-
-This directory contains utilities that are not part of the ACT core architecture itself, but support project-specific experiments.
-
-Files:
-- `check_cam_serial.py`
-- `custom_constants.py`
-- `custom_real_env.py`
-- `custom_robot_utils.py`
-- `demo_data_act_form.py`
-
-Typical roles of this folder:
-- camera checks
-- real-environment integration helpers
-- robot-specific constants/utilities
-- custom demo data handling / conversion
-
-This directory is useful when connecting the learning code to real robot pipelines or project-specific data capture tools.
-
----
-
-## 5.3 `source/data/`
-All dataset-related logic.
-
-This is the first place to modify for:
-- dataset return structure changes
-- new labels
-- normalization changes
-- loading behavior changes
-- train/val split logic
-
-### `source/data/dataset.py`
-Creates actual per-sample training items.
-
-Current known responsibilities:
-- episodic sampling
-- valid-length handling
-- camera key resolution
-- dataset object definition
-
-Current known functions/classes:
-- `_get_valid_len()`
-- `_resolve_cam_key()`
-- `EpisodicStartDataset`
-
-This is the **main patch point** for dataset-side research features such as:
-- `contact_label`
-- `phase_label`
-- `onset_weight`
-- history stacking / previous action input
-- return format changes
-
-If you want to add new supervision signals, this is usually the first file to edit.
-
----
-
-### `source/data/normalization.py`
-Handles normalization and denormalization of state/action values.
-
-Current known functions:
-- `compute_norm_stats_all()`
-- `denormalize_action()`
-
-Current normalization policy:
-- state/action (`qpos`, `action`): **per-dimension min-max normalization to [0, 1]**
-- image: `uint8 -> float [0,1]`
-- ImageNet normalization is applied later in the policy wrapper, not here
-
-This file is the main patch point for:
-- force-specific scaling
-- switching away from min-max normalization
-- removing possible train/val statistic leakage
-- different normalization for state vs action
-- per-group or per-channel normalization rules
-
----
-
-### `source/data/loader.py`
-Creates datasets, computes stats, splits train/val, and builds DataLoaders.
-
-Current known responsibilities:
-- find `episode_*.hdf5`
-- split training and validation sets
-- compute normalization stats
-- create DataLoader objects
-
-Current known function:
-- `load_data()`
-
-Edit this file when you need to change:
-- dataset discovery rules
-- episode split logic
-- stats computation strategy
-- batching / loader options
-
----
-
-## 5.4 `source/models/`
-Model architecture and training-facing policy wrappers.
-
-This folder contains both the ACT core model and the wrapper logic that computes losses and prepares images.
-
-### `source/models/backbone.py`
-CNN backbone utilities.
-
-Current known contents:
-- `FrozenBatchNorm2d`
-- positional encoding helpers
-- backbone builder
-- `build_backbone()`
-
-Use this file when changing:
-- image encoder backbone structure
-- positional features
-- vision feature extraction details
-
----
-
-### `source/models/transformer.py`
-Transformer implementation used by the model.
-
-Current known contents:
-- Transformer
-- Encoder / Decoder
-- `build_transformer()`
-
-Use this file when changing:
-- encoder/decoder depth
-- hidden interactions
-- attention flow
-- sequence handling inside the ACT model
-
----
-
-### `source/models/act_core.py`
-Core model definitions and model/optimizer builders.
-
-Current known contents:
-- ACT core model
-- CNNMLP core model
-- `DETRVAE`
-- model builder functions
-- optimizer builder functions
-
-Current known functions:
-- `build_ACT_model_and_optimizer()`
-- `build_CNNMLP_model_and_optimizer()`
-
-This is the main patch point for model-architecture changes such as:
-- force prediction head
-- contact head
-- phase head
-- latent representation changes
-- output head restructuring
-- hidden-state branching for auxiliary tasks
-
----
-
-### `source/models/policy.py`
-Training-facing wrapper around the core model.
-
-Current known contents:
-- `ACTPolicy`
-- `CNNMLPPolicy`
-- `kl_divergence`
-- image normalization
-- masked loss
-- `configure_optimizers()`
-
-This file currently handles important training behavior such as:
-- image preprocessing before the model
-- reconstruction loss calculation
-- KL term handling for ACT
-- padding-aware loss masking
-
-Current loss behavior:
-- **ACTPolicy**
-  - action reconstruction: **masked L1**
-  - latent KL: `kl_divergence`
-  - total loss = `l1 + kl_weight * kl`
-- **CNNMLPPolicy**
-  - MSE loss
-
-Important detail:
-- padded timesteps are masked out
-- current implementation already corrects for the issue where padded timesteps shrink the effective loss scale by using a valid-count-based normalization
-
-This is the main patch point for:
-- force-dimension weighting
-- auxiliary loss terms
-- contact BCE loss
-- phase-conditioned loss
-- masked loss revisions
-
----
-
-## 5.5 `source/training/`
-Training loop, debugging helpers, AMP utilities, and plotting.
-
-### `source/training/debug.py`
-Debugging and mixed precision helper utilities.
-
-Current known roles:
-- normalization debug output
-- AMP helper functions
-
-Current known functions:
-- `debug_norm_once()`
-- `make_grad_scaler()`
-- `autocast_context()`
-
-Use this file when changing:
-- debug print behavior
-- AMP/autocast convenience logic
-- grad scaler setup
-
----
-
-### `source/training/plotting.py`
-Training history plotting.
-
-Current known function:
-- `plot_history()`
-
-Use this file when modifying:
-- loss curve visualization
-- saved training figure formatting
-- post-training metric plots
-
----
-
-### `source/training/engine.py`
-Core training and validation loop.
-
-Current known responsibilities:
-- create the policy object
-- define forward pass behavior
-- train/validation loop
-
-Current known functions:
-- `make_policy()`
-- `forward_pass()`
-- `train_bc()`
-
-This is the main patch point for:
-- training loop control
-- logging frequency
-- validation frequency
-- gradient clipping
-- checkpoint save rules
-- mixed precision integration
-- extra metrics and training outputs
-
----
-
-## 6. Current import structure
-
-Current import relationships:
-
-### `scripts/act/train_act.py`
-Imports:
-- `from training.engine import train_bc, make_policy`
-- `from common.fs import find_latest_timestamped_subdir`
-- `from data.loader import load_data`
-
-### `source/training/engine.py`
-Imports:
-- `from common.utils import compute_dict_mean, set_seed`
-- `from models.policy import ACTPolicy, CNNMLPPolicy`
-- `from training.debug import ...`
-- `from training.plotting import ...`
-
-### `source/models/policy.py`
-Imports:
-- `from .act_core import ...`
-
-Important notes:
-- `source/models/__init__.py` must exist
-- it is strongly recommended to also keep `__init__.py` in `common/`, `data/`, and `training/` if package-style imports are used
-- if import errors appear, check:
-  1. missing `__init__.py`
-  2. incorrect path setup in `train_act.py`
-  3. typo in module paths
-
----
-
-## 7. How to run training
-
-### Typical training command
+Training entrypoint:
 
 ```bash
-cd /home/eunseop/nrs_act
-python3 scripts/act/train_act.py \
+python3 scripts/act/train_act.py ...
+```
+
+Flow:
+1. parse CLI args
+2. resolve dataset dir / task config
+3. build `policy_config`
+4. call `load_data(...)`
+5. create train / val loaders
+6. optionally print normalization debug
+7. build policy
+8. train / validate / save checkpoints
+
+---
+
+## 15. Main Training Command
+
+### Standard ACT training with force history
+
+```bash
+cd /home/eunseop/nrs_act && python3 scripts/act/train_act.py \
+  --ckpt_dir /home/eunseop/nrs_act/checkpoints/ur10e_swing \
+  --policy_class ACT \
+  --task_name ur10e_swing \
+  --batch_size 6 \
+  --seed 0 \
+  --num_epochs 500 \
+  --lr 1e-4 \
+  --kl_weight 10 \
+  --chunk_size 100 \
+  --hidden_dim 512 \
+  --dim_feedforward 3200 \
+  --debug_norm \
+  --use_force_history \
+  --force_history_len 10
+```
+
+### Without force history
+
+```bash
+cd /home/eunseop/nrs_act && python3 scripts/act/train_act.py \
   --ckpt_dir /home/eunseop/nrs_act/checkpoints/ur10e_swing \
   --policy_class ACT \
   --task_name ur10e_swing \
@@ -532,17 +538,35 @@ python3 scripts/act/train_act.py \
   --debug_norm
 ```
 
-### Example shell alias
+---
+
+## 16. Important CLI Flags for the New Structure
+
+### Force history flags
+- `--use_force_history`  
+  enables dataset-side force history generation and passes it to the model
+
+- `--force_history_len 10`  
+  sets the GRU history window length
+
+### Split encoder hyperparameters
+- `--position_dim`
+- `--force_dim`
+- `--position_encoder_hidden_dim`
+- `--force_encoder_hidden_dim`
+- `--force_encoder_num_layers`
+- `--force_encoder_dropout`
+- `--observation_encoder_activation`
+- `--cnnmlp_observation_embed_dim`
+
+---
+
+## 17. Inference / Evaluation Notes
+
+Evaluation command:
 
 ```bash
-alias train_act='cd /home/eunseop/nrs_act && python3 scripts/act/train_act.py --ckpt_dir /home/eunseop/nrs_act/checkpoints/ur10e_swing --policy_class ACT --task_name ur10e_swing --batch_size 6 --seed 0 --num_epochs 500 --lr 1e-4 --kl_weight 10 --chunk_size 100 --hidden_dim 512 --dim_feedforward 3200 --debug_norm'
-```
-
-### Evaluation mode example
-
-```bash
-cd /home/eunseop/nrs_act
-python3 scripts/act/train_act.py \
+cd /home/eunseop/nrs_act && python3 scripts/act/train_act.py \
   --eval \
   --ckpt_dir /home/eunseop/nrs_act/checkpoints/ur10e_swing \
   --policy_class ACT \
@@ -550,414 +574,154 @@ python3 scripts/act/train_act.py \
   --batch_size 6 \
   --seed 0 \
   --num_epochs 1 \
-  --lr 1e-4
+  --lr 1e-4 \
+  --use_force_history \
+  --force_history_len 10
 ```
 
----
+### Important
+If the model was trained with force history, online inference should also maintain a recent force buffer:
 
-## 8. Expected dataset format
+\[
+[f_{t-L+1}, \dots, f_t]
+\]
 
-A dataset directory is expected to contain episode files directly:
-
-```text
-dataset_dir/
-├── episode_0.hdf5
-├── episode_1.hdf5
-├── episode_2.hdf5
-└── ...
-```
-
-### Keys currently expected by the loader
-
-Observation side:
-- `/observations/position`
-- `/observations/force`
-- `/observations/images`
-- `/observations/is_pad`
-
-Action side:
-- `/action/position`
-- `/action/force`
-
-### Current dimensional convention
-- `/observations/position`: pose-like 6D
-- `/observations/force`: 3D
-- `/action/position`: pose-like 6D
-- `/action/force`: 3D
-
-Therefore:
-- `qpos = 6 + 3 = 9D`
-- `action = 6 + 3 = 9D`
-
-### Camera names
-Current expected camera names:
-- `cam_top`
-- `cam_ee`
-
-Fallback mapping:
-- `cam_top -> cam_front`
-- `cam_ee -> cam_head`
+Otherwise train-time and inference-time input structures do not match.
 
 ---
 
-## 9. Current normalization and loss behavior
+## 18. Checkpoints and Saved Files
 
-## 9.1 Normalization
-Current normalization rules:
-- `qpos` / `action`: **per-dimension min-max normalization to [0,1]**
-- image: `uint8 -> float [0,1]`
-- ImageNet normalization: applied in `source/models/policy.py`
+Training creates a timestamped directory under `checkpoints/<task_name>/...`.
 
-This means image normalization is split across two stages:
-1. basic numeric scaling in the data path
-2. ImageNet normalization in the policy wrapper
+Typical contents:
+- `policy_best.ckpt`
+- `policy_last.ckpt`
+- `dataset_stats.pkl`
+- optional plot outputs
 
----
-
-## 9.2 Loss
-### ACT policy
-- reconstruction loss: **masked L1**
-- KL term: `kl_divergence`
-- total:
-
-```text
-total = l1 + kl_weight * kl
-```
-
-### CNNMLP policy
-- MSE loss
-
-### Padding behavior
-Padded timesteps are excluded by masked loss.
-The current implementation already compensates for the loss-scaling issue that can happen when many padded timesteps exist by using valid-count-aware normalization.
+`dataset_stats.pkl` stores normalization statistics for later denormalization / deployment.
 
 ---
 
-## 10. What changed in the refactor
+## 19. Debug Output
 
-### Before refactor
-Major logic was mixed together:
-- backbone / transformer / ACT core / wrapper in one place
-- dataset / normalization / loader / common utils mixed together
-- training loop / debug / plotting / checkpoint helper mixed together
+When `--debug_norm` is enabled, training prints normalized statistics before training begins.
 
-### After refactor
-The code is separated by role:
+Current debug output includes:
+- image shape
+- qpos shape
+- action shape
+- is_pad shape
+- force_history shape (if enabled)
+- qpos per-dimension mean/std
+- action per-dimension mean/std
+- image RGB mean/std
+- force_history mean/std
+- range checks for normalized values
 
-- `source/models/`
-  - `policy.py`
-  - `act_core.py`
-  - `backbone.py`
-  - `transformer.py`
-- `source/data/`
-  - `dataset.py`
-  - `normalization.py`
-  - `loader.py`
-- `source/training/`
-  - `engine.py`
-  - `debug.py`
-  - `plotting.py`
-- `source/common/`
-  - `utils.py`
-  - `fs.py`
-
-This separation is the key baseline benefit of the current project.
+This is useful to verify:
+- normalization correctness
+- force-history value scale
+- dataset pipeline integrity
+- train/val split sanity
 
 ---
 
-## 11. Where to modify for future patches
+## 20. What Did *Not* Change
 
-This is the most important maintenance guide for the current baseline.
+Even after the new encoder patch:
+- final action dimension is still **9D**
+- output action remains:
 
-## A. Dataset / label patches
-Examples:
-- add `contact_label`
-- add `phase_label`
-- add `onset_weight`
-- add previous action / history stack
-- change dataset return format
+\[
+[x, y, z, w_x, w_y, w_z, f_x, f_y, f_z]
+\]
 
-Main files to edit:
+So the patch changes the **input representation**, not the final action definition.
+
+---
+
+## 21. Expected Effect of the New Structure
+
+### Before
+- current force only
+- no temporal force trend
+- pose and force immediately entangled
+
+### After
+- separate position encoder
+- GRU-based force-history encoder
+- fused observation representation
+- better opportunity to model:
+  - force transition
+  - contact onset
+  - contact maintenance
+  - force-aware action chunk prediction
+
+Expected inference-side benefits:
+- more context-aware force prediction
+- better non-contact → contact transition handling
+- more consistent force-conditioned action chunks
+- cleaner separation between geometry and force representation
+
+---
+
+## 22. Current Limitations
+
+This patch improves representation, but does **not** automatically solve all force prediction issues.
+
+Still likely future patch targets:
+- force dimension loss weighting
+- contact auxiliary loss
+- phase label / phase loss
+- onset weighting
+- auxiliary heads from latent / hidden state
+
+Most likely future files to patch:
 - `source/data/dataset.py`
-- sometimes `source/data/loader.py`
-- sometimes `source/data/normalization.py`
-
----
-
-## B. Normalization patches
-Examples:
-- force-only scaling
-- replace min-max normalization
-- train-only stats to avoid leakage
-- different normalization rule for state and action
-
-Main files to edit:
-- `source/data/normalization.py`
-- sometimes `source/data/loader.py`
-
----
-
-## C. Policy wrapper / loss patches
-Examples:
-- higher weight on force dimensions
-- contact auxiliary BCE loss
-- phase-conditioned loss
-- onset-region reweighting
-- masked loss behavior change
-
-Main files to edit:
-- `source/models/policy.py`
-- sometimes `source/training/engine.py`
-
----
-
-## D. Core model architecture patches
-Examples:
-- add force head
-- add contact head
-- add phase head
-- change latent structure
-- branch hidden representation
-- modify transformer output usage
-
-Main files to edit:
+- `source/models/encoder.py`
 - `source/models/act_core.py`
-- sometimes `source/models/backbone.py`
-- sometimes `source/models/transformer.py`
-
----
-
-## E. Training loop / logging / AMP patches
-Examples:
-- progress logging changes
-- gradient clipping
-- validation frequency changes
-- checkpoint save interval changes
-- mixed precision changes
-
-Main files to edit:
-- `source/training/engine.py`
-- `source/training/debug.py`
-- `source/training/plotting.py`
-
----
-
-## F. Checkpoint / path logic patches
-Examples:
-- latest checkpoint discovery changes
-- checkpoint naming rule changes
-- run folder handling changes
-
-Main files to edit:
-- `source/common/fs.py`
-- sometimes `scripts/act/train_act.py`
-
----
-
-## 12. Most likely next research direction
-
-Current practical concern:
-- position/orientation trajectory generation can work relatively well,
-- but force trajectory prediction—especially the **transition from non-contact (`fz = 0`) to contact (`fz > 0`)**—may remain unstable.
-
-Most likely next patch directions:
-
-### 1) Dataset-side label enhancement
-- `contact_label`
-- `phase_label`
-- `onset_weight`
-
-### 2) Loss-side reinforcement
-- increase force-dimension loss weight
-- add contact auxiliary BCE loss
-- add phase prediction loss
-- reweight onset / transition regions
-
-### 3) Model-side auxiliary outputs
-- auxiliary head on top of the main action head
-- contact prediction head
-- phase prediction head
-- hidden-state- or latent-based auxiliary prediction
-
-Most likely key files for the next stage:
-- `source/data/dataset.py`
 - `source/models/policy.py`
-- `source/models/act_core.py`
 - `source/training/engine.py`
 
 ---
 
-## 13. Rules that should not be broken
+## 23. Recommended Patch Rules Going Forward
 
-1. **Keep `train_act.py` minimal whenever possible**
-   - Do not move full training logic back into the script.
-
-2. **Do not mix `data / models / training / common` responsibilities**
-   - Do not move dataset logic into model files.
-   - Do not move loss/model logic into data files.
-
-3. **Preserve attribution and license notices**
-   - Keep original attribution visible.
-   - Do not remove license texts.
-
-4. **Protect package import structure**
-   - Keep `source/models/__init__.py`
-   - Prefer keeping `__init__.py` in other package-like folders as well
+1. keep `scripts/act/train_act.py` thin
+2. keep folder responsibilities separated
+3. do not mix dataset logic into model files unnecessarily
+4. preserve attribution and license files
+5. preserve import stability (`__init__.py` where needed)
+6. prefer modifying `source/` rather than rewriting the training script
 
 ---
 
-## 14. Common problems and checks
+## 24. Summary
 
-### Problem 1: package import error
-Example:
+`nrs_act` is now in a stronger baseline state for force-aware imitation learning.
 
-```text
-ModuleNotFoundError: No module named 'models.policy'
-```
+Current baseline status:
+- refactored modular structure completed
+- ACT training runs successfully
+- position / force encoder separation added
+- force-history GRU path added
+- raw `.hdf5` dataset format preserved
+- dataset-side on-the-fly force-history generation supported
+- debug pipeline updated to show force-history statistics
 
-Check:
-- does the directory have `__init__.py`?
-- is `source/` added to the import path correctly?
-- is the import string spelled correctly?
+In short, the project has evolved from:
 
----
+\[
+\text{shared current-state encoder}
+\]
 
-### Problem 2: missing function after file split
-Examples:
-- `build_backbone` missing
-- `train_bc` missing
+into:
 
-Check:
-- whether the split file was fully saved
-- whether the function was copied completely
-- use grep/search to confirm the symbol exists
+\[
+\text{position encoder} + \text{force-history GRU encoder} + \text{fusion encoder}
+\]
 
----
-
-### Problem 3: mixing old and new paths
-Do **not** mix:
-- old/legacy structure
-- `source/models/policy.py`
-- removed shim modules
-
-Current active path is:
-- `source/models/policy.py`
-
----
-
-### Problem 4: too many `__pycache__` folders
-These are safe to ignore.
-They can be removed for cleanup, but they are not part of the core logic.
-
----
-
-## 15. README and LICENSE status
-
-### `README.md`
-Should preserve and communicate:
-- current structure
-- usage
-- dataset format
-- credits / attribution
-- license guidance
-
-### `LICENSE`
-Currently preserves upstream license notices for:
-- ACT: MIT License
-- DETR: Apache License 2.0
-
-Do not remove these files.
-Do not strip license or attribution notices during redistribution.
-
----
-
-## 16. Attribution / original code authors / upstreams
-
-This repository is **not a from-scratch implementation**.
-It is a refactored baseline built on top of a customized ACT-based codebase.
-
-### Main customized ACT codebase origin
-- **Chemin Ahn**
-- Homepage: <https://chemx3937.github.io/>
-- GitHub: <https://github.com/Chemx3937>
-
-### Upstream project references
-#### ACT — Action Chunking with Transformers
-- **Tony Z. Zhao**
-- Project page: <https://tonyzhaozh.github.io/aloha/>
-- License basis: MIT License
-
-#### DETR
-- **Facebook Research**
-- GitHub: <https://github.com/facebookresearch/detr>
-- License basis: Apache License 2.0
-
-### Attribution rule
-Any future patch, external sharing, redistribution, or derivative work should preserve:
-- original customized-code attribution to **Chemin Ahn**
-- ACT upstream attribution
-- DETR upstream attribution
-- license notices in the root `LICENSE`
-
----
-
-## 17. Recommended continuation workflow
-
-When continuing development from this baseline, a good rule is:
-
-- keep `scripts/act/train_act.py` mostly unchanged
-- implement research changes inside `source/`
-- patch the narrowest correct module first
-
-Examples:
-- want contact labels? start with `source/data/dataset.py`
-- want force weighting? start with `source/models/policy.py`
-- want new head? start with `source/models/act_core.py`
-- want validation/logging changes? start with `source/training/engine.py`
-
----
-
-## 18. Baseline summary
-
-The current `nrs_act` baseline is best understood as:
-- a **refactored ACT-based imitation learning repository**
-- already reorganized for maintainability
-- already capable of starting training
-- structured for future **force/contact-aware learning patches**
-
-The most important current files for future work are:
-- `source/data/dataset.py`
-- `source/data/normalization.py`
-- `source/models/policy.py`
-- `source/models/act_core.py`
-- `source/training/engine.py`
-
-If those files are patched carefully while keeping the current separation of responsibilities, the repository should remain maintainable and extensible.
-
----
-
-## 19. Quick reference
-
-### Main entry
-- `scripts/act/train_act.py`
-
-### Main training loop
-- `source/training/engine.py`
-
-### Main dataset logic
-- `source/data/dataset.py`
-
-### Main normalization logic
-- `source/data/normalization.py`
-
-### Main policy/loss logic
-- `source/models/policy.py`
-
-### Main core model logic
-- `source/models/act_core.py`
-
-### Keep stable whenever possible
-- `scripts/act/train_act.py`
-- `README.md`
-- `LICENSE`
+while still predicting the same 9D action target.
 
