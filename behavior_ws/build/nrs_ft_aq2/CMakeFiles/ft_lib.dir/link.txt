@@ -1,2 +1,0 @@
-/usr/bin/ar qc libft_lib.a CMakeFiles/ft_lib.dir/src/CAN_reader.cpp.o CMakeFiles/ft_lib.dir/src/FT_Processing.cpp.o CMakeFiles/ft_lib.dir/src/nrs_filter_core.cpp.o CMakeFiles/ft_lib.dir/src/nrs_filter_applied.cpp.o
-/usr/bin/ranlib libft_lib.a

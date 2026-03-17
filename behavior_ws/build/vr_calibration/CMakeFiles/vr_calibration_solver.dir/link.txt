@@ -1,2 +1,0 @@
-/usr/bin/ar qc libvr_calibration_solver.a CMakeFiles/vr_calibration_solver.dir/src/vr_calibration_solver.cpp.o
-/usr/bin/ranlib libvr_calibration_solver.a

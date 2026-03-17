@@ -1,7 +1,0 @@
-[console_scripts]
-robot_controller = vive_tracker_ros2.robot_controller:main
-test_calibration = vive_tracker_ros2.test_calibration:main
-vive_tracker = vive_tracker_ros2.vive_tracker:main
-vive_tracker_node = vive_tracker_ros2.vive_tracker_node:main
-vr_diagnostic_tool = vive_tracker_ros2.vr_diagnostic_tool:main
-
