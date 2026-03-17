@@ -1,3 +1,6 @@
+behavior_ws/build/
+behavior_ws/install/
+behavior_ws/log/
 datasets/
 checkpoints/
 __pycache__
