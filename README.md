@@ -1,11 +1,128 @@
 # nrs_act
 
 Refactored ACT-based imitation learning codebase for robotic polishing / manipulation experiments.  
-This repository is organized around a modular `source/` layout and now supports a **split observation encoder** with **force history** input.
+This repository is organized around a modular `source/` layout, now includes a ROS 2 behavior workspace `behavior_ws/`, and supports a **split observation encoder** with **force history** input.
 
 ---
 
-## 1. Overview
+## 0. What each top-level folder does
+
+Before looking into the ACT model internals, the easiest way to understand this repository is to separate it into **training-side folders** and **robot/behavior-side folders**.
+
+```text
+nrs_act/
+├── behavior_ws/
+├── checkpoints/
+├── datasets/
+├── LICENSE
+├── README.md
+├── scripts/
+└── source/
+```
+
+### `behavior_ws/`
+ROS 2 workspace for the real experiment pipeline around ACT.
+
+Main role:
+- Vive tracker communication
+- tracker interface definitions
+- VR-to-robot frame calibration
+- gravity-compensated force/torque sensor communication
+- demonstration recording (`.txt` / `.hdf5`)
+- recorded episode pushing / playback
+- ACT inference node execution
+
+Contained packages:
+- `nrs_ft_aq2`
+- `nrs_imitation`
+- `vive_tracker_interfaces`
+- `vive_tracker_ros2`
+- `vr_calibration`
+
+In short, `behavior_ws` is the **data acquisition / playback / deployment side** of the project.
+
+---
+
+### `datasets/`
+Stores ACT training datasets.
+
+Typical role:
+- episode-based imitation-learning datasets
+- `.hdf5` trajectories used by the dataloader
+- task-specific dataset directories
+
+This is the main location for recorded episodes that will be consumed by `source/data/`.
+
+---
+
+### `checkpoints/`
+Stores training outputs and saved models.
+
+Typical contents:
+- timestamped training result directories
+- `policy_best.ckpt`
+- `policy_last.ckpt`
+- `dataset_stats.pkl`
+- plots or debug outputs generated during training/evaluation
+
+This is the main location for experiment results and reusable trained weights.
+
+---
+
+### `scripts/`
+Thin entrypoint scripts for training or evaluation.
+
+Most important file:
+- `scripts/act/train_act.py`
+
+Main role:
+- CLI parsing
+- experiment setup
+- calling the actual loader / model / training code in `source/`
+
+Design philosophy:
+- keep scripts light
+- move most algorithmic logic into `source/`
+
+---
+
+### `source/`
+Core ACT codebase after refactoring.
+
+Main role:
+- reusable project modules
+- dataset loading and normalization
+- ACT model and encoder definitions
+- training / validation loop
+- debug and plotting utilities
+
+This is the main folder to patch when modifying model behavior, data handling, losses, or training flow.
+
+---
+
+## 1. Repository role split
+
+At a high level, the repository is divided like this:
+
+### Training / research side
+- `datasets/`
+- `checkpoints/`
+- `scripts/`
+- `source/`
+
+### Real-world robot / behavior side
+- `behavior_ws/`
+
+So the overall pipeline is:
+1. use `behavior_ws` to capture demonstrations / replay data / run inference
+2. store datasets under `datasets/`
+3. train and evaluate with `scripts/act/train_act.py`
+4. save outputs under `checkpoints/`
+5. patch reusable logic mainly in `source/`
+
+---
+
+## 2. Overview
 
 `nrs_act` is an imitation learning project built on a customized ACT codebase and later refactored for maintainability and future research patches.
 
@@ -16,12 +133,13 @@ Current baseline characteristics:
 - Modular structure: `common / data / models / training`
 - Main entrypoint kept at `scripts/act/train_act.py`
 - Force-history-aware encoder support added without changing raw `.hdf5` demo files
+- ROS 2 real-world behavior workspace included under `behavior_ws/`
 
-This project is designed so that future patches can be added mainly under `source/` while keeping `scripts/act/train_act.py` as an orchestration entrypoint.
+This project is designed so that future patches can be added mainly under `source/` while keeping `scripts/act/train_act.py` as an orchestration entrypoint. The original README described the modular ACT structure and force-history-aware encoder design, which are preserved here. 
 
 ---
 
-## 2. Credits / Origin / Upstream
+## 3. Credits / Origin / Upstream
 
 This repository is **not a from-scratch implementation**. It is a refactored research codebase derived from a customized ACT implementation and upstream ACT/DETR components.
 
@@ -48,7 +166,7 @@ When sharing, patching, or redistributing this repository:
 
 ---
 
-## 3. License
+## 4. License
 
 The root `LICENSE` keeps integrated upstream notices.
 
@@ -65,12 +183,19 @@ Notes:
 
 ---
 
-## 4. Current Project Structure
+## 5. Current Project Structure
 
 ```text
 nrs_act/
 ├── LICENSE
 ├── README.md
+├── behavior_ws/
+│   └── src/
+│       ├── nrs_ft_aq2
+│       ├── nrs_imitation
+│       ├── vive_tracker_interfaces
+│       ├── vive_tracker_ros2
+│       └── vr_calibration
 ├── checkpoints/
 ├── datasets/
 ├── scripts/
@@ -109,10 +234,11 @@ Previous monolithic logic was split by responsibility:
 - `models/` → ACT core / policy / encoder / backbone / transformer
 - `training/` → train loop / debug / plotting
 - `common/` → general shared utilities
+- `behavior_ws/` → ROS 2 runtime pipeline for demonstration capture, calibration, playback, and inference
 
 ---
 
-## 5. What Each Folder Does
+## 6. What Each Folder Does
 
 ### `scripts/act/`
 Training / evaluation entrypoint.
@@ -214,7 +340,24 @@ This includes optional task config or hardware/environment support code used aro
 
 ---
 
-## 6. Observation / Action Definition
+### `behavior_ws/`
+ROS 2 workspace for behavior capture and deployment.
+
+Responsibilities:
+- bring up Vive tracker communication
+- provide tracker-related interfaces
+- calibrate VR-frame pose into UR10e base frame
+- read gravity-compensated force/torque data over CAN
+- record demonstrations as `.txt` / `.hdf5`
+- push recorded episodes to the robot
+- record robot playback ACT datasets
+- run online ACT inference nodes
+
+For detailed package explanations, refer to the dedicated `behavior_ws` README.
+
+---
+
+## 7. Observation / Action Definition
 
 ### Current action definition
 The model still predicts the same 9D action as before:
@@ -235,7 +378,7 @@ What changed is **how the observation is encoded**.
 
 ---
 
-## 7. Old Encoder Structure vs New Encoder Structure
+## 8. Old Encoder Structure vs New Encoder Structure
 
 ## Before
 A single shared state encoder processed the current 9D state directly:
@@ -300,7 +443,7 @@ These are then used by ACT / CNNMLP policy logic.
 
 ---
 
-## 8. Why the New Structure Matters
+## 9. Why the New Structure Matters
 
 The new structure improves the state representation in two ways.
 
@@ -329,7 +472,7 @@ This is especially important for:
 
 ---
 
-## 9. Force History: How It Is Added Without Changing Raw `.hdf5`
+## 10. Force History: How It Is Added Without Changing Raw `.hdf5`
 
 Raw demo files are **not rewritten**.
 
@@ -359,7 +502,7 @@ So the raw `.hdf5` stays the same, while the dataset becomes history-aware.
 
 ---
 
-## 10. Files Changed for the New Force-History Pipeline
+## 11. Files Changed for the New Force-History Pipeline
 
 ### Newly added / important
 - `source/models/encoder.py`
@@ -383,7 +526,7 @@ So the raw `.hdf5` stays the same, while the dataset becomes history-aware.
 
 ---
 
-## 11. Encoder Components in `source/models/encoder.py`
+## 12. Encoder Components in `source/models/encoder.py`
 
 ### `PositionStateEncoder`
 Encodes:
@@ -420,7 +563,7 @@ Used for the CNNMLP baseline path.
 
 ---
 
-## 12. Current Data Format Assumption
+## 13. Current Data Format Assumption
 
 Each dataset directory should contain:
 
@@ -453,7 +596,7 @@ Fallback mapping:
 
 ---
 
-## 13. Normalization
+## 14. Normalization
 
 ### qpos / action
 Per-dimension min-max normalization to `[0, 1]`.
@@ -478,7 +621,7 @@ When enabled, `force_history` is normalized using the same min/max used for the 
 
 ---
 
-## 14. Training Flow
+## 15. Training Flow
 
 Training entrypoint:
 
@@ -498,7 +641,7 @@ Flow:
 
 ---
 
-## 15. Main Training Command
+## 16. Main Training Command
 
 ### Standard ACT training with force history
 
@@ -540,7 +683,7 @@ cd /home/eunseop/nrs_act && python3 scripts/act/train_act.py \
 
 ---
 
-## 16. Important CLI Flags for the New Structure
+## 17. Important CLI Flags for the New Structure
 
 ### Force history flags
 - `--use_force_history`  
@@ -561,7 +704,7 @@ cd /home/eunseop/nrs_act && python3 scripts/act/train_act.py \
 
 ---
 
-## 17. Inference / Evaluation Notes
+## 18. Inference / Evaluation Notes
 
 Evaluation command:
 
@@ -590,7 +733,7 @@ Otherwise train-time and inference-time input structures do not match.
 
 ---
 
-## 18. Checkpoints and Saved Files
+## 19. Checkpoints and Saved Files
 
 Training creates a timestamped directory under `checkpoints/<task_name>/...`.
 
@@ -604,7 +747,7 @@ Typical contents:
 
 ---
 
-## 19. Debug Output
+## 20. Debug Output
 
 When `--debug_norm` is enabled, training prints normalized statistics before training begins.
 
@@ -628,7 +771,7 @@ This is useful to verify:
 
 ---
 
-## 20. What Did *Not* Change
+## 21. What Did *Not* Change
 
 Even after the new encoder patch:
 - final action dimension is still **9D**
@@ -642,7 +785,7 @@ So the patch changes the **input representation**, not the final action definiti
 
 ---
 
-## 21. Expected Effect of the New Structure
+## 22. Expected Effect of the New Structure
 
 ### Before
 - current force only
@@ -667,7 +810,7 @@ Expected inference-side benefits:
 
 ---
 
-## 22. Current Limitations
+## 23. Current Limitations
 
 This patch improves representation, but does **not** automatically solve all force prediction issues.
 
@@ -687,7 +830,7 @@ Most likely future files to patch:
 
 ---
 
-## 23. Recommended Patch Rules Going Forward
+## 24. Recommended Patch Rules Going Forward
 
 1. keep `scripts/act/train_act.py` thin
 2. keep folder responsibilities separated
@@ -698,7 +841,7 @@ Most likely future files to patch:
 
 ---
 
-## 24. Summary
+## 25. Summary
 
 `nrs_act` is now in a stronger baseline state for force-aware imitation learning.
 
@@ -710,6 +853,7 @@ Current baseline status:
 - raw `.hdf5` dataset format preserved
 - dataset-side on-the-fly force-history generation supported
 - debug pipeline updated to show force-history statistics
+- ROS 2 `behavior_ws` added for real-world behavior capture and deployment
 
 In short, the project has evolved from:
 
@@ -723,5 +867,4 @@ into:
 \text{position encoder} + \text{force-history GRU encoder} + \text{fusion encoder}
 \]
 
-while still predicting the same 9D action target.
-
+while also connecting that ACT pipeline to a behavior-side ROS 2 workspace for demonstration capture, playback, and inference.
