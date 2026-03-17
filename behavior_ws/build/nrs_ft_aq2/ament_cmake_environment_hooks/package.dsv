@@ -1,0 +1,4 @@
+source;share/nrs_ft_aq2/local_setup.bash
+source;share/nrs_ft_aq2/local_setup.dsv
+source;share/nrs_ft_aq2/local_setup.sh
+source;share/nrs_ft_aq2/local_setup.zsh

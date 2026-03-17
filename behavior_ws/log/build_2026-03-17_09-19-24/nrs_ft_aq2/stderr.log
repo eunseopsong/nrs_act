@@ -1,0 +1,37 @@
+In file included from [01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/CAN_reader.cpp:1[m[K:
+[01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/CAN_reader.hpp:[m[K In constructor ‘[01m[KNRS_FTSensor::NRS_FTSensor(unsigned char, unsigned char, bool, bool)[m[K’:
+[01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/CAN_reader.hpp:110:132:[m[K [01;35m[Kwarning: [m[K‘[01m[KNRS_FTSensor::CAng_pvel_val[m[K’ will be initialized after [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wreorder-Wreorder]8;;[m[K]
+  110 |     std::vector<double> init_Force, init_Moment, init_Contact_Force, init_Contact_Moment, Ang_vel_val, Ang_pvel_val, CAng_vel_val, [01;35m[KCAng_pvel_val[m[K;
+      |                                                                                                                                    [01;35m[K^~~~~~~~~~~~~[m[K
+In file included from [01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/CAN_reader.cpp:1[m[K:
+[01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/CAN_reader.hpp:103:25:[m[K [01;35m[Kwarning: [m[K  ‘[01m[Kstd::vector<double> NRS_FTSensor::Force_val[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wreorder-Wreorder]8;;[m[K]
+  103 |     std::vector<double> [01;35m[KForce_val[m[K, Moment_val, Contact_Force_val, Contact_Moment_val, Pos_acc_val, Ang_acc_val, CPos_acc_val, CAng_acc_val;
+      |                         [01;35m[K^~~~~~~~~[m[K
+[01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/CAN_reader.cpp:3:1:[m[K [01;35m[Kwarning: [m[K  when initialized here [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wreorder-Wreorder]8;;[m[K]
+    3 | [01;35m[KNRS_FTSensor[m[K::NRS_FTSensor(unsigned char Handle_ID_, unsigned char Contact_ID_, bool HaccSwitch_, bool CaccSwitch_)
+      | [01;35m[K^~~~~~~~~~~~[m[K
+In file included from [01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/CAN_reader.cpp:1[m[K:
+[01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/CAN_reader.hpp:103:127:[m[K [01;35m[Kwarning: [m[K‘[01m[KNRS_FTSensor::CAng_acc_val[m[K’ will be initialized after [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wreorder-Wreorder]8;;[m[K]
+  103 |     std::vector<double> Force_val, Moment_val, Contact_Force_val, Contact_Moment_val, Pos_acc_val, Ang_acc_val, CPos_acc_val, [01;35m[KCAng_acc_val[m[K;
+      |                                                                                                                               [01;35m[K^~~~~~~~~~~~[m[K
+[01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/CAN_reader.hpp:32:19:[m[K [01;35m[Kwarning: [m[K  ‘[01m[Kunsigned char NRS_FTSensor::Handle_ID[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wreorder-Wreorder]8;;[m[K]
+   32 |     unsigned char [01;35m[KHandle_ID[m[K,Contact_ID;
+      |                   [01;35m[K^~~~~~~~~[m[K
+[01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/CAN_reader.cpp:3:1:[m[K [01;35m[Kwarning: [m[K  when initialized here [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wreorder-Wreorder]8;;[m[K]
+    3 | [01;35m[KNRS_FTSensor[m[K::NRS_FTSensor(unsigned char Handle_ID_, unsigned char Contact_ID_, bool HaccSwitch_, bool CaccSwitch_)
+      | [01;35m[K^~~~~~~~~~~~[m[K
+In file included from [01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/CAN_sender.cpp:1[m[K:
+[01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/CAN_sender.hpp:33:39:[m[K [01;35m[Kwarning: [m[Kmissing initializer for member ‘[01m[Ktimeval::tv_usec[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wmissing-field-initializers-Wmissing-field-initializers]8;;[m[K]
+   33 |     struct timeval last_time[256] = {0[01;35m[K}[m[K;
+      |                                       [01;35m[K^[m[K
+In file included from [01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/FT_Processing.cpp:1[m[K:
+[01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/FT_Processing.hpp:[m[K In constructor ‘[01m[KFT_processing::FT_processing(std::shared_ptr<rclcpp::Node>, double, unsigned char&, unsigned char&, bool, bool)[m[K’:
+[01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/FT_Processing.hpp:45:35:[m[K [01;35m[Kwarning: [m[K‘[01m[KFT_processing::node_[m[K’ will be initialized after [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wreorder-Wreorder]8;;[m[K]
+   45 |     std::shared_ptr<rclcpp::Node> [01;35m[Knode_[m[K;
+      |                                   [01;35m[K^~~~~[m[K
+[01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/FT_Processing.cpp:44:32:[m[K [01;35m[Kwarning: [m[K  base ‘[01m[KNRS_FTSensor[m[K’ [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wreorder-Wreorder]8;;[m[K]
+   44 |   BSF_CM(3, NRS_FreqFilter(Ts_)[01;35m[K)[m[K
+      |                                [01;35m[K^[m[K
+[01m[K/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/src/FT_Processing.cpp:22:1:[m[K [01;35m[Kwarning: [m[K  when initialized here [[01;35m[K]8;;https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Wreorder-Wreorder]8;;[m[K]
+   22 | [01;35m[KFT_processing[m[K::FT_processing(std::shared_ptr<rclcpp::Node> node,
+      | [01;35m[K^~~~~~~~~~~~~[m[K

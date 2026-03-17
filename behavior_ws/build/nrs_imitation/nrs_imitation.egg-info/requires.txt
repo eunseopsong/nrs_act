@@ -1,0 +1,9 @@
+cv_bridge
+numpy
+opencv-python
+rclpy
+setuptools
+torch
+
+[test]
+pytest

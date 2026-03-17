@@ -1,0 +1,14 @@
+[console_scripts]
+act_keyboard_infer_node = nrs_imitation.act_keyboard_infer_node:main
+act_policy_infer = nrs_imitation.act_policy_infer:main
+act_txt_postprocessor = nrs_imitation.act_txt_postprocessor:main
+node_act_cmdmotion_infer = nrs_imitation.node_act_cmdmotion_infer:main
+node_check_inference = nrs_imitation.node_check_inference:main
+robot_playback_act_hdf5_recorder = nrs_imitation.robot_playback_act_hdf5_recorder:main
+ur10_keyboard_recorder = nrs_imitation.ur10_keyboard_recorder:main
+vr_demo_hdf5_episode_pusher = nrs_imitation.vr_demo_hdf5_episode_pusher:main
+vr_demo_hdf5_recorder = nrs_imitation.vr_demo_hdf5_recorder:main
+vr_demo_recorder = nrs_imitation.vr_demo_recorder:main
+vr_demo_txt_recorder = nrs_imitation.vr_demo_txt_recorder:main
+vr_demo_txt_wo_filter = nrs_imitation.vr_demo_txt_wo_filter:main
+

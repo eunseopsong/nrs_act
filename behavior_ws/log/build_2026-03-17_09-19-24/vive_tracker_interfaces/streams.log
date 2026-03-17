@@ -1,0 +1,206 @@
+[0.015s] Invoking command in '/home/eunseop/nrs_act/behavior_ws/build/vive_tracker_interfaces': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake /home/eunseop/nrs_act/behavior_ws/src/vive_tracker_interfaces -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces
+[0.138s] -- The C compiler identification is GNU 11.4.0
+[0.144s] -- The CXX compiler identification is GNU 11.4.0
+[0.151s] -- Detecting C compiler ABI info
+[0.189s] -- Detecting C compiler ABI info - done
+[0.192s] -- Check for working C compiler: /usr/bin/cc - skipped
+[0.192s] -- Detecting C compile features
+[0.192s] -- Detecting C compile features - done
+[0.194s] -- Detecting CXX compiler ABI info
+[0.229s] -- Detecting CXX compiler ABI info - done
+[0.232s] -- Check for working CXX compiler: /usr/bin/c++ - skipped
+[0.232s] -- Detecting CXX compile features
+[0.233s] -- Detecting CXX compile features - done
+[0.249s] -- Found ament_cmake: 1.3.13 (/opt/ros/humble/share/ament_cmake/cmake)
+[0.331s] -- Found Python3: /usr/bin/python3 (found version "3.10.12") found components: Interpreter 
+[0.367s] -- Override CMake install command with custom implementation using symlinks instead of copying resources
+[0.401s] -- Found geometry_msgs: 4.9.1 (/opt/ros/humble/share/geometry_msgs/cmake)
+[0.444s] -- Found rosidl_generator_c: 3.1.8 (/opt/ros/humble/share/rosidl_generator_c/cmake)
+[0.449s] -- Found rosidl_adapter: 3.1.8 (/opt/ros/humble/share/rosidl_adapter/cmake)
+[0.458s] -- Found rosidl_generator_cpp: 3.1.8 (/opt/ros/humble/share/rosidl_generator_cpp/cmake)
+[0.475s] -- Using all available rosidl_typesupport_c: rosidl_typesupport_fastrtps_c;rosidl_typesupport_introspection_c
+[0.490s] -- Using all available rosidl_typesupport_cpp: rosidl_typesupport_fastrtps_cpp;rosidl_typesupport_introspection_cpp
+[0.521s] -- Found rosidl_default_generators: 1.2.0 (/opt/ros/humble/share/rosidl_default_generators/cmake)
+[0.675s] -- Found ament_cmake_ros: 0.10.0 (/opt/ros/humble/share/ament_cmake_ros/cmake)
+[0.909s] -- Using all available rosidl_typesupport_c: rosidl_typesupport_fastrtps_c;rosidl_typesupport_introspection_c
+[1.006s] -- Using all available rosidl_typesupport_cpp: rosidl_typesupport_fastrtps_cpp;rosidl_typesupport_introspection_cpp
+[1.019s] -- Found PythonInterp: /usr/bin/python3 (found suitable version "3.10.12", minimum required is "3.6") 
+[1.022s] -- Found python_cmake_module: 0.10.0 (/opt/ros/humble/share/python_cmake_module/cmake)
+[1.042s] -- Found PythonLibs: /usr/lib/x86_64-linux-gnu/libpython3.10.so (found suitable version "3.10.12", minimum required is "3.5") 
+[1.042s] -- Using PYTHON_EXECUTABLE: /usr/bin/python3
+[1.042s] -- Using PYTHON_INCLUDE_DIRS: /usr/include/python3.10
+[1.042s] -- Using PYTHON_LIBRARIES: /usr/lib/x86_64-linux-gnu/libpython3.10.so
+[1.054s] -- Found PythonExtra: .so  
+[1.094s] -- Found ament_lint_auto: 0.12.15 (/opt/ros/humble/share/ament_lint_auto/cmake)
+[1.118s] -- Added test 'lint_cmake' to check CMake code style
+[1.119s] -- Added test 'xmllint' to check XML markup files
+[1.120s] -- Configuring done
+[1.134s] -- Generating done
+[1.139s] -- Build files have been written to: /home/eunseop/nrs_act/behavior_ws/build/vive_tracker_interfaces
+[1.148s] Invoked command in '/home/eunseop/nrs_act/behavior_ws/build/vive_tracker_interfaces' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake /home/eunseop/nrs_act/behavior_ws/src/vive_tracker_interfaces -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces
+[1.148s] Invoking command in '/home/eunseop/nrs_act/behavior_ws/build/vive_tracker_interfaces': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --build /home/eunseop/nrs_act/behavior_ws/build/vive_tracker_interfaces -- -j16 -l16
+[1.170s] [  3%] [34m[1mGenerating C code for ROS interfaces[0m
+[1.175s] [  6%] [34m[1mGenerating C++ code for ROS interfaces[0m
+[1.179s] [  6%] Built target ament_cmake_python_symlink_vive_tracker_interfaces
+[1.321s] running egg_info
+[1.321s] creating vive_tracker_interfaces.egg-info
+[1.321s] writing vive_tracker_interfaces.egg-info/PKG-INFO
+[1.321s] writing dependency_links to vive_tracker_interfaces.egg-info/dependency_links.txt
+[1.321s] writing top-level names to vive_tracker_interfaces.egg-info/top_level.txt
+[1.321s] writing manifest file 'vive_tracker_interfaces.egg-info/SOURCES.txt'
+[1.321s] [  6%] Built target vive_tracker_interfaces__cpp
+[1.321s] reading manifest file 'vive_tracker_interfaces.egg-info/SOURCES.txt'
+[1.322s] [  9%] [32mBuilding C object CMakeFiles/vive_tracker_interfaces__rosidl_generator_c.dir/rosidl_generator_c/vive_tracker_interfaces/srv/detail/vive_calibration__functions.c.o[0m
+[1.322s] writing manifest file 'vive_tracker_interfaces.egg-info/SOURCES.txt'
+[1.333s] [ 16%] [34m[1mGenerating C++ type support for eProsima Fast-RTPS[0m
+[1.333s] [ 16%] [34m[1mGenerating C++ type support dispatch for ROS interfaces[0m
+[1.333s] [ 19%] [34m[1mGenerating C++ introspection for ROS interfaces[0m
+[1.357s] [ 19%] Built target ament_cmake_python_build_vive_tracker_interfaces_egg
+[1.377s] [ 22%] [32m[1mLinking C shared library libvive_tracker_interfaces__rosidl_generator_c.so[0m
+[1.410s] [ 22%] Built target vive_tracker_interfaces__rosidl_generator_c
+[1.416s] [ 25%] [34m[1mGenerating C type support for eProsima Fast-RTPS[0m
+[1.418s] [ 32%] [34m[1mGenerating C type support dispatch for ROS interfaces[0m
+[1.418s] [ 32%] [34m[1mGenerating C introspection for ROS interfaces[0m
+[1.483s] [ 35%] [32mBuilding CXX object CMakeFiles/vive_tracker_interfaces__rosidl_typesupport_cpp.dir/rosidl_typesupport_cpp/vive_tracker_interfaces/srv/vive_calibration__type_support.cpp.o[0m
+[1.507s] [ 38%] [32mBuilding CXX object CMakeFiles/vive_tracker_interfaces__rosidl_typesupport_introspection_cpp.dir/rosidl_typesupport_introspection_cpp/vive_tracker_interfaces/srv/detail/vive_calibration__type_support.cpp.o[0m
+[1.507s] [ 41%] [32mBuilding CXX object CMakeFiles/vive_tracker_interfaces__rosidl_typesupport_fastrtps_cpp.dir/rosidl_typesupport_fastrtps_cpp/vive_tracker_interfaces/srv/detail/dds_fastrtps/vive_calibration__type_support.cpp.o[0m
+[1.600s] [ 45%] [32mBuilding CXX object CMakeFiles/vive_tracker_interfaces__rosidl_typesupport_c.dir/rosidl_typesupport_c/vive_tracker_interfaces/srv/vive_calibration__type_support.cpp.o[0m
+[1.601s] [ 48%] [32mBuilding C object CMakeFiles/vive_tracker_interfaces__rosidl_typesupport_introspection_c.dir/rosidl_typesupport_introspection_c/vive_tracker_interfaces/srv/detail/vive_calibration__type_support.c.o[0m
+[1.614s] [ 51%] [32mBuilding CXX object CMakeFiles/vive_tracker_interfaces__rosidl_typesupport_fastrtps_c.dir/rosidl_typesupport_fastrtps_c/vive_tracker_interfaces/srv/detail/vive_calibration__type_support_c.cpp.o[0m
+[1.620s] [ 54%] [32m[1mLinking CXX shared library libvive_tracker_interfaces__rosidl_typesupport_c.so[0m
+[1.622s] [ 58%] [32m[1mLinking CXX shared library libvive_tracker_interfaces__rosidl_typesupport_cpp.so[0m
+[1.632s] [ 61%] [32m[1mLinking C shared library libvive_tracker_interfaces__rosidl_typesupport_introspection_c.so[0m
+[1.649s] [ 61%] Built target vive_tracker_interfaces__rosidl_typesupport_c
+[1.651s] [ 61%] Built target vive_tracker_interfaces__rosidl_typesupport_cpp
+[1.657s] [ 61%] Built target vive_tracker_interfaces__rosidl_typesupport_introspection_c
+[1.710s] [ 64%] [32m[1mLinking CXX shared library libvive_tracker_interfaces__rosidl_typesupport_introspection_cpp.so[0m
+[1.735s] [ 67%] [32m[1mLinking CXX shared library libvive_tracker_interfaces__rosidl_typesupport_fastrtps_cpp.so[0m
+[1.749s] [ 67%] Built target vive_tracker_interfaces__rosidl_typesupport_introspection_cpp
+[1.774s] [ 67%] Built target vive_tracker_interfaces__rosidl_typesupport_fastrtps_cpp
+[1.774s] [ 70%] [32m[1mLinking CXX shared library libvive_tracker_interfaces__rosidl_typesupport_fastrtps_c.so[0m
+[1.811s] [ 70%] Built target vive_tracker_interfaces__rosidl_typesupport_fastrtps_c
+[1.821s] [ 70%] Built target vive_tracker_interfaces
+[1.829s] [ 74%] [34m[1mGenerating Python code for ROS interfaces[0m
+[1.982s] [ 74%] Built target vive_tracker_interfaces__py
+[1.991s] [ 77%] [32mBuilding C object CMakeFiles/vive_tracker_interfaces__rosidl_generator_py.dir/rosidl_generator_py/vive_tracker_interfaces/srv/_vive_calibration_s.c.o[0m
+[2.044s] [ 80%] [32m[1mLinking C shared library rosidl_generator_py/vive_tracker_interfaces/libvive_tracker_interfaces__rosidl_generator_py.so[0m
+[2.066s] [ 80%] Built target vive_tracker_interfaces__rosidl_generator_py
+[2.075s] [ 90%] [32mBuilding C object CMakeFiles/vive_tracker_interfaces__rosidl_typesupport_fastrtps_c__pyext.dir/rosidl_generator_py/vive_tracker_interfaces/_vive_tracker_interfaces_s.ep.rosidl_typesupport_fastrtps_c.c.o[0m
+[2.075s] [ 90%] [32mBuilding C object CMakeFiles/vive_tracker_interfaces__rosidl_typesupport_c__pyext.dir/rosidl_generator_py/vive_tracker_interfaces/_vive_tracker_interfaces_s.ep.rosidl_typesupport_c.c.o[0m
+[2.075s] [ 90%] [32mBuilding C object CMakeFiles/vive_tracker_interfaces__rosidl_typesupport_introspection_c__pyext.dir/rosidl_generator_py/vive_tracker_interfaces/_vive_tracker_interfaces_s.ep.rosidl_typesupport_introspection_c.c.o[0m
+[2.117s] [100%] [32m[1mLinking C shared library rosidl_generator_py/vive_tracker_interfaces/vive_tracker_interfaces_s__rosidl_typesupport_introspection_c.cpython-310-x86_64-linux-gnu.so[0m
+[2.117s] [100%] [32m[1mLinking C shared library rosidl_generator_py/vive_tracker_interfaces/vive_tracker_interfaces_s__rosidl_typesupport_fastrtps_c.cpython-310-x86_64-linux-gnu.so[0m
+[2.117s] [100%] [32m[1mLinking C shared library rosidl_generator_py/vive_tracker_interfaces/vive_tracker_interfaces_s__rosidl_typesupport_c.cpython-310-x86_64-linux-gnu.so[0m
+[2.135s] [100%] Built target vive_tracker_interfaces__rosidl_typesupport_introspection_c__pyext
+[2.136s] [100%] Built target vive_tracker_interfaces__rosidl_typesupport_c__pyext
+[2.136s] [100%] Built target vive_tracker_interfaces__rosidl_typesupport_fastrtps_c__pyext
+[2.141s] Invoked command in '/home/eunseop/nrs_act/behavior_ws/build/vive_tracker_interfaces' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --build /home/eunseop/nrs_act/behavior_ws/build/vive_tracker_interfaces -- -j16 -l16
+[2.145s] Invoking command in '/home/eunseop/nrs_act/behavior_ws/build/vive_tracker_interfaces': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --install /home/eunseop/nrs_act/behavior_ws/build/vive_tracker_interfaces
+[2.148s] -- Install configuration: ""
+[2.148s] -- Execute custom install script
+[2.149s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/ament_index/resource_index/rosidl_interfaces/vive_tracker_interfaces
+[2.152s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/msg/rosidl_generator_c__visibility_control.h
+[2.156s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/srv/detail/vive_calibration__functions.h
+[2.159s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/srv/detail/vive_calibration__struct.h
+[2.163s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/srv/detail/vive_calibration__type_support.h
+[2.166s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/srv/vive_calibration.h
+[2.169s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/environment/library_path.sh
+[2.173s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/environment/library_path.dsv
+[2.176s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/msg/rosidl_typesupport_fastrtps_c__visibility_control.h
+[2.180s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/srv/detail/vive_calibration__rosidl_typesupport_fastrtps_c.h
+[2.183s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/msg/rosidl_generator_cpp__visibility_control.hpp
+[2.186s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/srv/detail/vive_calibration__builder.hpp
+[2.190s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/srv/detail/vive_calibration__struct.hpp
+[2.193s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/srv/detail/vive_calibration__traits.hpp
+[2.197s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/srv/detail/vive_calibration__type_support.hpp
+[2.200s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/srv/vive_calibration.hpp
+[2.203s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/msg/rosidl_typesupport_fastrtps_cpp__visibility_control.h
+[2.207s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/srv/detail/vive_calibration__rosidl_typesupport_fastrtps_cpp.hpp
+[2.210s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/msg/rosidl_typesupport_introspection_c__visibility_control.h
+[2.213s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/srv/detail/vive_calibration__rosidl_typesupport_introspection_c.h
+[2.217s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/include/vive_tracker_interfaces/vive_tracker_interfaces/srv/detail/vive_calibration__rosidl_typesupport_introspection_cpp.hpp
+[2.220s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/environment/pythonpath.sh
+[2.224s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/environment/pythonpath.dsv
+[2.227s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces-0.0.0-py3.10.egg-info/PKG-INFO
+[2.230s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces-0.0.0-py3.10.egg-info/SOURCES.txt
+[2.234s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces-0.0.0-py3.10.egg-info/dependency_links.txt
+[2.237s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces-0.0.0-py3.10.egg-info/top_level.txt
+[2.240s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/__init__.py
+[2.244s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/_vive_tracker_interfaces_s.ep.rosidl_typesupport_c.c
+[2.247s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/_vive_tracker_interfaces_s.ep.rosidl_typesupport_fastrtps_c.c
+[2.250s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/_vive_tracker_interfaces_s.ep.rosidl_typesupport_introspection_c.c
+[2.254s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/libvive_tracker_interfaces__rosidl_generator_py.so
+[2.257s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/srv/__init__.py
+[2.260s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/srv/_vive_calibration.py
+[2.264s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/srv/_vive_calibration_s.c
+[2.267s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/vive_tracker_interfaces_s__rosidl_typesupport_c.cpython-310-x86_64-linux-gnu.so
+[2.271s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/vive_tracker_interfaces_s__rosidl_typesupport_fastrtps_c.cpython-310-x86_64-linux-gnu.so
+[2.274s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/vive_tracker_interfaces_s__rosidl_typesupport_introspection_c.cpython-310-x86_64-linux-gnu.so
+[2.279s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/vive_tracker_interfaces_s__rosidl_typesupport_fastrtps_c.cpython-310-x86_64-linux-gnu.so
+[2.279s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/vive_tracker_interfaces_s__rosidl_typesupport_introspection_c.cpython-310-x86_64-linux-gnu.so
+[2.279s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/vive_tracker_interfaces_s__rosidl_typesupport_c.cpython-310-x86_64-linux-gnu.so
+[2.280s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/srv/ViveCalibration.idl
+[2.283s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/srv/ViveCalibration.srv
+[2.286s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/srv/ViveCalibration_Request.msg
+[2.290s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/srv/ViveCalibration_Response.msg
+[2.293s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/ament_index/resource_index/package_run_dependencies/vive_tracker_interfaces
+[2.296s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/ament_index/resource_index/parent_prefix_path/vive_tracker_interfaces
+[2.299s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/environment/ament_prefix_path.sh
+[2.302s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/environment/ament_prefix_path.dsv
+[2.306s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/environment/path.sh
+[2.309s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/environment/path.dsv
+[2.312s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/local_setup.bash
+[2.316s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/local_setup.sh
+[2.319s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/local_setup.zsh
+[2.322s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/local_setup.dsv
+[2.325s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/package.dsv
+[2.329s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/ament_index/resource_index/packages/vive_tracker_interfaces
+[2.332s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/rosidl_cmake-extras.cmake
+[2.336s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/ament_cmake_export_dependencies-extras.cmake
+[2.339s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/ament_cmake_export_include_directories-extras.cmake
+[2.342s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/ament_cmake_export_libraries-extras.cmake
+[2.346s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/ament_cmake_export_targets-extras.cmake
+[2.349s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/rosidl_cmake_export_typesupport_targets-extras.cmake
+[2.352s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/rosidl_cmake_export_typesupport_libraries-extras.cmake
+[2.355s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/vive_tracker_interfacesConfig.cmake
+[2.359s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/vive_tracker_interfacesConfig-version.cmake
+[2.362s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/package.xml
+[2.365s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_generator_c.so
+[2.365s] -- Set runtime path of "/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_generator_c.so" to ""
+[2.366s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_typesupport_fastrtps_c.so
+[2.366s] -- Set runtime path of "/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_typesupport_fastrtps_c.so" to ""
+[2.366s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_typesupport_fastrtps_cpp.so
+[2.366s] -- Set runtime path of "/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_typesupport_fastrtps_cpp.so" to ""
+[2.366s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_typesupport_introspection_c.so
+[2.366s] -- Set runtime path of "/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_typesupport_introspection_c.so" to ""
+[2.366s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_typesupport_c.so
+[2.366s] -- Set runtime path of "/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_typesupport_c.so" to ""
+[2.366s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_typesupport_introspection_cpp.so
+[2.366s] -- Set runtime path of "/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_typesupport_introspection_cpp.so" to ""
+[2.366s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_typesupport_cpp.so
+[2.366s] -- Set runtime path of "/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_typesupport_cpp.so" to ""
+[2.388s] Listing '/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces'...
+[2.388s] Compiling '/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/__init__.py'...
+[2.388s] Listing '/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/srv'...
+[2.388s] Compiling '/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/srv/__init__.py'...
+[2.388s] Compiling '/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/local/lib/python3.10/dist-packages/vive_tracker_interfaces/srv/_vive_calibration.py'...
+[2.391s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_generator_py.so
+[2.391s] -- Set runtime path of "/home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/lib/libvive_tracker_interfaces__rosidl_generator_py.so" to ""
+[2.391s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/export_vive_tracker_interfaces__rosidl_generator_cExport.cmake
+[2.391s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/export_vive_tracker_interfaces__rosidl_generator_cExport-noconfig.cmake
+[2.391s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/export_vive_tracker_interfaces__rosidl_typesupport_fastrtps_cExport.cmake
+[2.391s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/export_vive_tracker_interfaces__rosidl_typesupport_fastrtps_cExport-noconfig.cmake
+[2.391s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/export_vive_tracker_interfaces__rosidl_generator_cppExport.cmake
+[2.391s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/export_vive_tracker_interfaces__rosidl_typesupport_fastrtps_cppExport.cmake
+[2.391s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/export_vive_tracker_interfaces__rosidl_typesupport_fastrtps_cppExport-noconfig.cmake
+[2.392s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/vive_tracker_interfaces__rosidl_typesupport_introspection_cExport.cmake
+[2.392s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/vive_tracker_interfaces__rosidl_typesupport_introspection_cExport-noconfig.cmake
+[2.392s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/vive_tracker_interfaces__rosidl_typesupport_cExport.cmake
+[2.392s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/vive_tracker_interfaces__rosidl_typesupport_cExport-noconfig.cmake
+[2.392s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/vive_tracker_interfaces__rosidl_typesupport_introspection_cppExport.cmake
+[2.392s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/vive_tracker_interfaces__rosidl_typesupport_introspection_cppExport-noconfig.cmake
+[2.392s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/vive_tracker_interfaces__rosidl_typesupport_cppExport.cmake
+[2.392s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/vive_tracker_interfaces__rosidl_typesupport_cppExport-noconfig.cmake
+[2.392s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/export_vive_tracker_interfaces__rosidl_generator_pyExport.cmake
+[2.392s] -- Installing: /home/eunseop/nrs_act/behavior_ws/install/vive_tracker_interfaces/share/vive_tracker_interfaces/cmake/export_vive_tracker_interfaces__rosidl_generator_pyExport-noconfig.cmake
+[2.394s] Invoked command in '/home/eunseop/nrs_act/behavior_ws/build/vive_tracker_interfaces' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --install /home/eunseop/nrs_act/behavior_ws/build/vive_tracker_interfaces

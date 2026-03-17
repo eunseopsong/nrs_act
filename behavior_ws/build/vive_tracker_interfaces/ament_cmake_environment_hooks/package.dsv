@@ -1,0 +1,4 @@
+source;share/vive_tracker_interfaces/local_setup.bash
+source;share/vive_tracker_interfaces/local_setup.dsv
+source;share/vive_tracker_interfaces/local_setup.sh
+source;share/vive_tracker_interfaces/local_setup.zsh

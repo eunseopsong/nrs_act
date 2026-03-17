@@ -1,0 +1,28 @@
+[0.327s] Invoking command in '/home/eunseop/nrs_act/behavior_ws/build/nrs_imitation': PYTHONPATH=/home/eunseop/nrs_act/behavior_ws/build/nrs_imitation/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/eunseop/nrs_act/behavior_ws/build/nrs_imitation/build --no-deps symlink_data
+[0.442s] running develop
+[0.517s] running egg_info
+[0.517s] writing nrs_imitation.egg-info/PKG-INFO
+[0.517s] writing dependency_links to nrs_imitation.egg-info/dependency_links.txt
+[0.517s] writing entry points to nrs_imitation.egg-info/entry_points.txt
+[0.517s] writing requirements to nrs_imitation.egg-info/requires.txt
+[0.517s] writing top-level names to nrs_imitation.egg-info/top_level.txt
+[0.518s] reading manifest file 'nrs_imitation.egg-info/SOURCES.txt'
+[0.518s] writing manifest file 'nrs_imitation.egg-info/SOURCES.txt'
+[0.519s] running build_ext
+[0.519s] Creating /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/python3.10/site-packages/nrs-imitation.egg-link (link to .)
+[0.519s] Installing act_keyboard_infer_node script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+[0.519s] Installing act_policy_infer script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+[0.519s] Installing act_txt_postprocessor script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+[0.519s] Installing node_act_cmdmotion_infer script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+[0.519s] Installing node_check_inference script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+[0.519s] Installing robot_playback_act_hdf5_recorder script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+[0.519s] Installing ur10_keyboard_recorder script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+[0.519s] Installing vr_demo_hdf5_episode_pusher script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+[0.519s] Installing vr_demo_hdf5_recorder script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+[0.519s] Installing vr_demo_recorder script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+[0.519s] Installing vr_demo_txt_recorder script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+[0.519s] Installing vr_demo_txt_wo_filter script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+[0.520s] 
+[0.520s] Installed /home/eunseop/nrs_act/behavior_ws/build/nrs_imitation
+[0.520s] running symlink_data
+[0.533s] Invoked command in '/home/eunseop/nrs_act/behavior_ws/build/nrs_imitation' returned '0': PYTHONPATH=/home/eunseop/nrs_act/behavior_ws/build/nrs_imitation/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/eunseop/nrs_act/behavior_ws/build/nrs_imitation/build --no-deps symlink_data

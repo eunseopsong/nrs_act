@@ -1,0 +1,1 @@
+/home/eunseop/nrs_act/behavior_ws/src/nrs_ft_aq2/launch/nrsvr_ft_aq.launch.py

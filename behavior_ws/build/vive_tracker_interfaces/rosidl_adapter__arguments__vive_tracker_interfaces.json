@@ -1,0 +1,6 @@
+{
+  "package_name": "vive_tracker_interfaces",
+  "non_idl_tuples": [
+    "/home/eunseop/nrs_act/behavior_ws/src/vive_tracker_interfaces:srv/ViveCalibration.srv"
+  ]
+}

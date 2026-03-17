@@ -1,0 +1,69 @@
+[0.127s] Invoking command in '/home/eunseop/nrs_act/behavior_ws/build/vr_calibration': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake /home/eunseop/nrs_act/behavior_ws/src/vr_calibration -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/eunseop/nrs_act/behavior_ws/install/vr_calibration
+[0.151s] -- The C compiler identification is GNU 11.4.0
+[0.176s] -- The CXX compiler identification is GNU 11.4.0
+[0.179s] -- Detecting C compiler ABI info
+[0.209s] -- Detecting C compiler ABI info - done
+[0.211s] -- Check for working C compiler: /usr/bin/cc - skipped
+[0.212s] -- Detecting C compile features
+[0.212s] -- Detecting C compile features - done
+[0.213s] -- Detecting CXX compiler ABI info
+[0.248s] -- Detecting CXX compiler ABI info - done
+[0.251s] -- Check for working CXX compiler: /usr/bin/c++ - skipped
+[0.251s] -- Detecting CXX compile features
+[0.251s] -- Detecting CXX compile features - done
+[0.253s] -- Found ament_cmake: 1.3.13 (/opt/ros/humble/share/ament_cmake/cmake)
+[0.333s] -- Found Python3: /usr/bin/python3 (found version "3.10.12") found components: Interpreter 
+[0.364s] -- Override CMake install command with custom implementation using symlinks instead of copying resources
+[0.390s] -- Found rclcpp: 16.0.18 (/opt/ros/humble/share/rclcpp/cmake)
+[0.432s] -- Found rosidl_generator_c: 3.1.8 (/opt/ros/humble/share/rosidl_generator_c/cmake)
+[0.437s] -- Found rosidl_adapter: 3.1.8 (/opt/ros/humble/share/rosidl_adapter/cmake)
+[0.446s] -- Found rosidl_generator_cpp: 3.1.8 (/opt/ros/humble/share/rosidl_generator_cpp/cmake)
+[0.463s] -- Using all available rosidl_typesupport_c: rosidl_typesupport_fastrtps_c;rosidl_typesupport_introspection_c
+[0.478s] -- Using all available rosidl_typesupport_cpp: rosidl_typesupport_fastrtps_cpp;rosidl_typesupport_introspection_cpp
+[0.523s] -- Found rmw_implementation_cmake: 6.1.2 (/opt/ros/humble/share/rmw_implementation_cmake/cmake)
+[0.527s] -- Found rmw_cyclonedds_cpp: 1.3.4 (/opt/ros/humble/share/rmw_cyclonedds_cpp/cmake)
+[0.550s] -- Using RMW implementation 'rmw_cyclonedds_cpp' as default
+[0.560s] -- Looking for pthread.h
+[0.598s] -- Looking for pthread.h - found
+[0.599s] -- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+[0.633s] -- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+[0.633s] -- Found Threads: TRUE  
+[0.667s] -- Found geometry_msgs: 4.9.1 (/opt/ros/humble/share/geometry_msgs/cmake)
+[0.674s] -- Found std_srvs: 4.9.1 (/opt/ros/humble/share/std_srvs/cmake)
+[0.725s] -- Configuring done
+[0.729s] -- Generating done
+[0.731s] -- Build files have been written to: /home/eunseop/nrs_act/behavior_ws/build/vr_calibration
+[0.736s] Invoked command in '/home/eunseop/nrs_act/behavior_ws/build/vr_calibration' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake /home/eunseop/nrs_act/behavior_ws/src/vr_calibration -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/eunseop/nrs_act/behavior_ws/install/vr_calibration
+[0.736s] Invoking command in '/home/eunseop/nrs_act/behavior_ws/build/vr_calibration': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --build /home/eunseop/nrs_act/behavior_ws/build/vr_calibration -- -j16 -l16
+[0.755s] [ 25%] [32mBuilding CXX object CMakeFiles/vr_calibration_solver.dir/src/vr_calibration_solver.cpp.o[0m
+[6.352s] [ 50%] [32m[1mLinking CXX static library libvr_calibration_solver.a[0m
+[6.423s] [ 50%] Built target vr_calibration_solver
+[6.432s] [ 75%] [32mBuilding CXX object CMakeFiles/vr_calibration.dir/src/vr_calibration.cpp.o[0m
+[16.612s] [100%] [32m[1mLinking CXX executable vr_calibration[0m
+[16.943s] [100%] Built target vr_calibration
+[16.947s] Invoked command in '/home/eunseop/nrs_act/behavior_ws/build/vr_calibration' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --build /home/eunseop/nrs_act/behavior_ws/build/vr_calibration -- -j16 -l16
+[16.948s] Invoking command in '/home/eunseop/nrs_act/behavior_ws/build/vr_calibration': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --install /home/eunseop/nrs_act/behavior_ws/build/vr_calibration
+[16.951s] -- Install configuration: ""
+[16.951s] -- Execute custom install script
+[16.951s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/lib/vr_calibration/vr_calibration
+[16.954s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/lib/libvr_calibration_solver.a
+[16.958s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/include//vr_calibration/.keep
+[16.961s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/yaml/for_vr_calibration_point.txt
+[16.964s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/yaml/ur10_ee.txt
+[16.967s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/yaml/ur10_vr.txt
+[16.970s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/ament_index/resource_index/package_run_dependencies/vr_calibration
+[16.973s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/ament_index/resource_index/parent_prefix_path/vr_calibration
+[16.975s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/environment/ament_prefix_path.sh
+[16.978s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/environment/ament_prefix_path.dsv
+[16.981s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/environment/path.sh
+[16.984s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/environment/path.dsv
+[16.987s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/local_setup.bash
+[16.990s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/local_setup.sh
+[16.993s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/local_setup.zsh
+[16.996s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/local_setup.dsv
+[16.999s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/package.dsv
+[17.002s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/ament_index/resource_index/packages/vr_calibration
+[17.005s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/cmake/vr_calibrationConfig.cmake
+[17.009s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/cmake/vr_calibrationConfig-version.cmake
+[17.012s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/package.xml
+[17.016s] Invoked command in '/home/eunseop/nrs_act/behavior_ws/build/vr_calibration' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --install /home/eunseop/nrs_act/behavior_ws/build/vr_calibration

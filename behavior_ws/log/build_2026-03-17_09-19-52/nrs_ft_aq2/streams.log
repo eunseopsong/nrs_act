@@ -1,0 +1,41 @@
+[0.009s] Invoking command in '/home/eunseop/nrs_act/behavior_ws/build/nrs_ft_aq2': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --build /home/eunseop/nrs_act/behavior_ws/build/nrs_ft_aq2 -- -j16 -l16
+[0.134s] [35m[1mConsolidate compiler generated dependencies of target can_sender_node[0m
+[0.134s] [35m[1mConsolidate compiler generated dependencies of target ft_lib[0m
+[0.134s] [ 22%] Built target can_sender_node
+[0.134s] [ 77%] Built target ft_lib
+[0.134s] [35m[1mConsolidate compiler generated dependencies of target ft_aq_main_node[0m
+[0.134s] [100%] Built target ft_aq_main_node
+[0.134s] Invoked command in '/home/eunseop/nrs_act/behavior_ws/build/nrs_ft_aq2' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --build /home/eunseop/nrs_act/behavior_ws/build/nrs_ft_aq2 -- -j16 -l16
+[0.139s] Invoking command in '/home/eunseop/nrs_act/behavior_ws/build/nrs_ft_aq2': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --install /home/eunseop/nrs_act/behavior_ws/build/nrs_ft_aq2
+[0.142s] -- Install configuration: ""
+[0.142s] -- Execute custom install script
+[0.142s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/lib/nrs_ft_aq2/libft_lib.a
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/lib/nrs_ft_aq2/can_sender_node
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/lib/nrs_ft_aq2/ft_aq_main_node
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/launch/nrs_ft_aq.launch.py
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/launch/nrsvr_ft_aq.launch.py
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/config/VR_config.yaml
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/config/config.yaml
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/ament_index/resource_index/package_run_dependencies/nrs_ft_aq2
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/ament_index/resource_index/parent_prefix_path/nrs_ft_aq2
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/environment/ament_prefix_path.sh
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/environment/ament_prefix_path.dsv
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/environment/path.sh
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/environment/path.dsv
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/local_setup.bash
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/local_setup.sh
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/local_setup.zsh
+[0.143s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/local_setup.dsv
+[0.143s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/package.dsv
+[0.147s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/ament_index/resource_index/packages/nrs_ft_aq2
+[0.147s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/cmake/nrs_ft_aq2Config.cmake
+[0.147s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/cmake/nrs_ft_aq2Config-version.cmake
+[0.147s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/share/nrs_ft_aq2/package.xml
+[0.147s] -- Up-to-date: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/include/nrs_ft_aq2
+[0.147s] -- Up-to-date: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/include/nrs_ft_aq2/CAN_sender.hpp
+[0.147s] -- Up-to-date: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/include/nrs_ft_aq2/nrs_filter_applied.hpp
+[0.147s] -- Up-to-date: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/include/nrs_ft_aq2/nrs_filter_core.hpp
+[0.147s] -- Up-to-date: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/include/nrs_ft_aq2/.vscode
+[0.147s] -- Up-to-date: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/include/nrs_ft_aq2/FT_Processing.hpp
+[0.147s] -- Up-to-date: /home/eunseop/nrs_act/behavior_ws/install/nrs_ft_aq2/include/nrs_ft_aq2/CAN_reader.hpp
+[0.148s] Invoked command in '/home/eunseop/nrs_act/behavior_ws/build/nrs_ft_aq2' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --install /home/eunseop/nrs_act/behavior_ws/build/nrs_ft_aq2

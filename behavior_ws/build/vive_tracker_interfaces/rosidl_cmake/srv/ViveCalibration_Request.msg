@@ -1,0 +1,2 @@
+geometry_msgs/Pose[] robot_poses
+geometry_msgs/Pose[] tracker_poses

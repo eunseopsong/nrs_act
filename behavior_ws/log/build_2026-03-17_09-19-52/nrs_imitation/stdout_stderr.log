@@ -1,0 +1,26 @@
+running develop
+running egg_info
+writing nrs_imitation.egg-info/PKG-INFO
+writing dependency_links to nrs_imitation.egg-info/dependency_links.txt
+writing entry points to nrs_imitation.egg-info/entry_points.txt
+writing requirements to nrs_imitation.egg-info/requires.txt
+writing top-level names to nrs_imitation.egg-info/top_level.txt
+reading manifest file 'nrs_imitation.egg-info/SOURCES.txt'
+writing manifest file 'nrs_imitation.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/python3.10/site-packages/nrs-imitation.egg-link (link to .)
+Installing act_keyboard_infer_node script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+Installing act_policy_infer script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+Installing act_txt_postprocessor script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+Installing node_act_cmdmotion_infer script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+Installing node_check_inference script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+Installing robot_playback_act_hdf5_recorder script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+Installing ur10_keyboard_recorder script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+Installing vr_demo_hdf5_episode_pusher script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+Installing vr_demo_hdf5_recorder script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+Installing vr_demo_recorder script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+Installing vr_demo_txt_recorder script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+Installing vr_demo_txt_wo_filter script to /home/eunseop/nrs_act/behavior_ws/install/nrs_imitation/lib/nrs_imitation
+
+Installed /home/eunseop/nrs_act/behavior_ws/build/nrs_imitation
+running symlink_data

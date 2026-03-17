@@ -1,0 +1,13 @@
+Metadata-Version: 2.1
+Name: nrs-imitation
+Version: 0.1.0
+Summary: ROS2 node for ACT policy inference with Isaac Sim UR10e
+Home-page: UNKNOWN
+Maintainer: eunseop
+Maintainer-email: lexondms1@g.skku.edu
+License: MIT
+Platform: UNKNOWN
+Provides-Extra: test
+
+UNKNOWN
+

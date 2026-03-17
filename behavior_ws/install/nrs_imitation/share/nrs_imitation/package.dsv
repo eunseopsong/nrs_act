@@ -1,0 +1,9 @@
+source;share/nrs_imitation/hook/pythonpath.ps1
+source;share/nrs_imitation/hook/pythonpath.dsv
+source;share/nrs_imitation/hook/pythonpath.sh
+source;share/nrs_imitation/hook/ament_prefix_path.ps1
+source;share/nrs_imitation/hook/ament_prefix_path.dsv
+source;share/nrs_imitation/hook/ament_prefix_path.sh
+source;../../build/nrs_imitation/share/nrs_imitation/hook/pythonpath_develop.ps1
+source;../../build/nrs_imitation/share/nrs_imitation/hook/pythonpath_develop.dsv
+source;../../build/nrs_imitation/share/nrs_imitation/hook/pythonpath_develop.sh

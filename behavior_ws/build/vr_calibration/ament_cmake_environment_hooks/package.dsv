@@ -1,0 +1,4 @@
+source;share/vr_calibration/local_setup.bash
+source;share/vr_calibration/local_setup.dsv
+source;share/vr_calibration/local_setup.sh
+source;share/vr_calibration/local_setup.zsh

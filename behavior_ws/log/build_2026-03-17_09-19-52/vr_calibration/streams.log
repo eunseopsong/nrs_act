@@ -1,0 +1,31 @@
+[0.136s] Invoking command in '/home/eunseop/nrs_act/behavior_ws/build/vr_calibration': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --build /home/eunseop/nrs_act/behavior_ws/build/vr_calibration -- -j16 -l16
+[0.154s] [35m[1mConsolidate compiler generated dependencies of target vr_calibration_solver[0m
+[0.160s] [ 50%] Built target vr_calibration_solver
+[0.164s] [35m[1mConsolidate compiler generated dependencies of target vr_calibration[0m
+[0.172s] [100%] Built target vr_calibration
+[0.177s] Invoked command in '/home/eunseop/nrs_act/behavior_ws/build/vr_calibration' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --build /home/eunseop/nrs_act/behavior_ws/build/vr_calibration -- -j16 -l16
+[0.177s] Invoking command in '/home/eunseop/nrs_act/behavior_ws/build/vr_calibration': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --install /home/eunseop/nrs_act/behavior_ws/build/vr_calibration
+[0.181s] -- Install configuration: ""
+[0.181s] -- Execute custom install script
+[0.181s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/lib/vr_calibration/vr_calibration
+[0.181s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/lib/libvr_calibration_solver.a
+[0.181s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/include//vr_calibration/.keep
+[0.181s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/yaml/for_vr_calibration_point.txt
+[0.181s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/yaml/ur10_ee.txt
+[0.181s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/yaml/ur10_vr.txt
+[0.181s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/ament_index/resource_index/package_run_dependencies/vr_calibration
+[0.181s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/ament_index/resource_index/parent_prefix_path/vr_calibration
+[0.181s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/environment/ament_prefix_path.sh
+[0.181s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/environment/ament_prefix_path.dsv
+[0.181s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/environment/path.sh
+[0.181s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/environment/path.dsv
+[0.182s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/local_setup.bash
+[0.182s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/local_setup.sh
+[0.182s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/local_setup.zsh
+[0.182s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/local_setup.dsv
+[0.182s] -- Symlinking: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/package.dsv
+[0.185s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/ament_index/resource_index/packages/vr_calibration
+[0.185s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/cmake/vr_calibrationConfig.cmake
+[0.185s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/cmake/vr_calibrationConfig-version.cmake
+[0.185s] -- Up-to-date symlink: /home/eunseop/nrs_act/behavior_ws/install/vr_calibration/share/vr_calibration/package.xml
+[0.186s] Invoked command in '/home/eunseop/nrs_act/behavior_ws/build/vr_calibration' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/eunseop/dualarm_ws/install/manus_path:/home/eunseop/nrs_ws/install/vive_tracker_ros2:/home/eunseop/nrs_ws/install/nrs_imitation:/home/eunseop/nrs_ws/install/nrs_dlc:/home/eunseop/nrs_ws/install/joint_control:/opt/ros/humble /usr/bin/cmake --install /home/eunseop/nrs_act/behavior_ws/build/vr_calibration
