@@ -29,6 +29,7 @@
 
 // ================= Constants =================
 static constexpr double kPi = 3.14159265358979323846;
+static constexpr double kDefaultTCeStoredZ_M = 0.320;
 
 static inline double deg2rad(double d){ return d * kPi / 180.0; }
 static inline double rad2deg(double r){ return r * 180.0 / kPi; }
@@ -237,7 +238,7 @@ public:
     vel_thresh_mms_      = 15.0;  // mm/s
     angvel_thresh_dps_   = 8.0;   // deg/s
 
-    hold_time_s_ = 2.0;
+    hold_time_s_ = 1.5;
 
     cp_fresh_s_       = 1.0;
     vr_capture_age_s_ = 30.0;
@@ -458,11 +459,13 @@ public:
       const double dist_mm = posDistMm(cp, target_pose);
       const double ang_deg = oriErrDeg(cp, target_pose);
 
+      updateMotionIfNew(cp, cp_t, cp_seq);
+      const bool stopped_now = isStoppedNow();
+
       if (state == State::WAIT_ENTER) {
-        if (dist_mm <= pos_enter_mm_ && ang_deg <= ori_enter_deg_) {
+        if (dist_mm <= pos_enter_mm_ && ang_deg <= ori_enter_deg_ && stopped_now) {
           state = State::IN_REGION;
           hold_active = false;
-          resetMotionDetector();
           target_start_time = tnow();
           resetCleanCaptureBuffer();
 
@@ -495,9 +498,6 @@ public:
         resetCleanCaptureBuffer();
       }
 
-      updateMotionIfNew(cp, cp_t, cp_seq);
-
-      const bool stopped_now = isStoppedNow();
       if (!(dist_mm <= pos_enter_mm_ && ang_deg <= ori_enter_deg_)) {
         hold_active = false;
         resetCleanCaptureBuffer();
@@ -586,8 +586,8 @@ private:
   double ori_exit_deg_{60.0};
   double vel_thresh_mms_{15.0};
   double angvel_thresh_dps_{8.0};
-  double hold_time_s_{2.0};
-  double min_hold_time_s_{1.5};
+  double hold_time_s_{1.5};
+  double min_hold_time_s_{0.8};
   double cp_fresh_s_{1.0};
   double vr_capture_age_s_{30.0};
   double max_capture_sync_dt_s_{0.05};
@@ -1531,7 +1531,7 @@ private:
   {
     // defaults
     T_CE_ = Eigen::Matrix4d::Identity();
-    T_CE_(2,3) = 0.222;
+    T_CE_(2,3) = kDefaultTCeStoredZ_M;
 
     T_SA_old_ = Eigen::Matrix4d::Identity();
 
@@ -1542,7 +1542,7 @@ private:
         Eigen::Matrix4d tmp = Eigen::Matrix4d::Identity();
         if (readMat4(existing["T_CE"], tmp)) {
           T_CE_ = tmp;
-          RCLCPP_INFO(get_logger(), "[YAML] Loaded existing T_CE.");
+          RCLCPP_INFO(get_logger(), "[YAML] Loaded existing T_CE z=%.4fm.", T_CE_(2,3));
         }
       }
 
@@ -1559,6 +1559,29 @@ private:
     } catch (...) {
       RCLCPP_WARN(get_logger(), "[YAML] load failed; create new");
       RCLCPP_WARN(get_logger(), "[YAML] path=%s", calib_yaml_path_.c_str());
+    }
+  }
+
+  void refreshTCeFromYamlForSave()
+  {
+    try {
+      YAML::Node existing = YAML::LoadFile(calib_yaml_path_);
+      if (!existing["T_CE"]) {
+        RCLCPP_WARN(get_logger(), "[YAML] T_CE missing before save; keep current z=%.4fm.", T_CE_(2,3));
+        return;
+      }
+
+      Eigen::Matrix4d tmp = Eigen::Matrix4d::Identity();
+      if (!readMat4(existing["T_CE"], tmp)) {
+        RCLCPP_WARN(get_logger(), "[YAML] T_CE invalid before save; keep current z=%.4fm.", T_CE_(2,3));
+        return;
+      }
+
+      T_CE_ = tmp;
+      RCLCPP_INFO(get_logger(), "[YAML] Refreshed T_CE before save z=%.4fm.", T_CE_(2,3));
+    } catch (const std::exception& e) {
+      RCLCPP_WARN(get_logger(), "[YAML] T_CE refresh before save failed: %s", e.what());
+      RCLCPP_WARN(get_logger(), "[YAML] Keep current T_CE z=%.4fm.", T_CE_(2,3));
     }
   }
 
@@ -2171,6 +2194,8 @@ private:
       else T_SA_to_save = T_SA_old_;
     }
 
+    refreshTCeFromYamlForSave();
+
     writeCalibrationYamlAll(
       T_AD_avg,
       T_BC,
@@ -2272,6 +2297,7 @@ private:
     ofs << "]\n\n";
 
     ofs << "# final constant offset; runtime applies this last when apply_T_CE_extra=true\n";
+    ofs << "# T_CE[2,3] is stored as a positive downward z correction knob.\n";
     writeMat4("T_CE", T_CE);
 
     ofs << "# spatial-angle frame alignment (right-multiply)\n";

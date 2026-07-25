@@ -45,7 +45,7 @@ ros2 run vr_calibration vr_calibration --ros-args \
 - `T_BC`: robot EE에서 tracker/tool frame까지의 offset
 - `R_Adj`: VR point cloud와 robot point cloud의 미세 기울어짐/축 정렬 보정
 - `T_FIX`: z-plane residual을 줄이기 위한 left-multiplied rigid correction
-- `T_CE`: legacy constant offset
+- `T_CE`: final constant offset. `T_CE[2,3]` is stored as a positive z correction knob.
 - `T_SA`: orientation display/alignment용 right-multiplied rotation correction
 
 ## 기본 실행
@@ -71,8 +71,8 @@ t_sa_mode = update
 t_sa_max_delta_deg = 180.0
 radj_enable = false        # 기본은 raw VR world를 그대로 쓰고 T_AD가 base-station/world frame 차이를 흡수
 radj_sample_count = 0        # 0 또는 음수면 전체 captured sample 사용
-capture_hold_time_s = 2.0
-capture_min_hold_time_s = 1.5
+capture_hold_time_s = 1.5
+capture_min_hold_time_s = 0.8
 capture_window_s = 0.5
 capture_min_clean_samples = 20
 vr_capture_age_s = 0.2
@@ -178,6 +178,8 @@ tool_correction_mode=t_ce
 ```
 
 현재 기본값은 `none`이다. 따라서 아무 인자 없이 `vive_tracker_node`를 실행하면 `/calibrated_pose`는 robot EE pose가 아니라 tracker pose로 나온다. EE/TCP pose가 필요하면 명시적으로 `t_bc`를 켠다.
+
+`apply_T_CE_extra=true`이면 `T_CE`가 최종 단계에서 추가 적용된다. YAML의 `T_CE[2,3]` 값을 `+dz`만큼 키우면 published z가 대략 `dz`만큼 내려간다. `vive_tracker_node`는 YAML 변경을 감지해서 실행 중에도 `T_CE`를 다시 로드한다.
 
 ```bash
 ros2 run vive_tracker_ros2 vive_tracker_node --ros-args \

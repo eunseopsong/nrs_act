@@ -29,6 +29,9 @@ from vive_tracker_ros2.utils import (
 import ament_index_python.packages
 
 
+T_CE_RUNTIME_Z_BIAS_M = 0.051
+
+
 # -------------------------
 # Basic rotations
 # -------------------------
@@ -200,7 +203,7 @@ class ViveTracker(Node):
         # t_bc: publish EE/TCP pose by removing solved EE->tracker offset
         # t_ce: legacy alias; final T_CE is applied after all other corrections
         # none: publish calibrated tracker/world pose before final T_CE
-        self.declare_parameter("tool_correction_mode", "t_bc")
+        self.declare_parameter("tool_correction_mode", "none")
         self.declare_parameter("apply_T_CE_extra", True)
 
         # --- rotvec 연속화 (π 근처 튐 완화)
@@ -347,7 +350,12 @@ class ViveTracker(Node):
 
         self.T_AD = np.array(data.get("T_AD", np.eye(4)), dtype=np.float64)
         self.T_BC = np.array(data.get("T_BC", np.eye(4)), dtype=np.float64)
-        self.T_CE = np.array(data.get("T_CE", np.eye(4)), dtype=np.float64)
+        T_CE_loaded = self._to_T44(data.get("T_CE", None))
+        if self._is_valid_T(T_CE_loaded):
+            self._set_T_CE(T_CE_loaded)
+        else:
+            self._set_T_CE(np.eye(4, dtype=np.float64))
+            self.get_logger().warn("[T_CE] not found/invalid in yaml. Using identity.")
         self.R_Adj = np.array(data.get("R_Adj", np.eye(3)), dtype=np.float64)
         T_FIX_loaded = self._to_T44(data.get("T_FIX", None))
         self.Z_RESIDUAL = self._load_z_residual(data.get("Z_RESIDUAL", None))
@@ -392,6 +400,7 @@ class ViveTracker(Node):
             f"rotvec_continuous={self.rotvec_continuous}, out_fix_mode={self.out_fix_mode}, "
             f"tool_correction_mode={self.tool_correction_mode}, apply_T_CE_extra={self.apply_T_CE_extra}"
         )
+        self._log_T_CE("loaded")
         if self.debug_print_T_SA:
             self.get_logger().info("T_SA=\n" + np.array2string(self.T_SA, precision=6, suppress_small=True))
             self.get_logger().info("T_FIX=\n" + np.array2string(self.T_FIX, precision=6, suppress_small=True))
@@ -421,21 +430,33 @@ class ViveTracker(Node):
                 self.get_logger().warn("[T_CE] yaml changed but T_CE is invalid; keeping previous value.")
                 self._t_ce_yaml_mtime_ns = mtime_ns
                 return
-            self.T_CE = T_CE
+            self._set_T_CE(T_CE)
             self._t_ce_yaml_mtime_ns = mtime_ns
-            self.get_logger().info(
-                f"[T_CE] reloaded from yaml: t=[{self.T_CE[0,3]:.4f} "
-                f"{self.T_CE[1,3]:.4f} {self.T_CE[2,3]:.4f}]"
-            )
+            self._log_T_CE("reloaded")
         except Exception as exc:
             self.get_logger().warn(f"[T_CE] reload failed: {exc}")
             self._t_ce_yaml_mtime_ns = mtime_ns
 
-    def _runtime_T_CE(self) -> np.ndarray:
-        # YAML stores T_CE z as positive; runtime keeps the legacy -0.197 m final offset.
-        T_CE = self.T_CE.copy()
-        T_CE[2, 3] = -(T_CE[2, 3] + 0.051)
+    def _make_runtime_T_CE(self, T_CE_yaml: np.ndarray) -> np.ndarray:
+        # YAML stores T_CE z as a positive downward correction knob.
+        # Runtime applies the final offset along negative local-z after adding
+        # the fixed mount bias, so +dz in YAML lowers published z by about dz.
+        T_CE = T_CE_yaml.copy()
+        T_CE[2, 3] = -(T_CE_yaml[2, 3] + T_CE_RUNTIME_Z_BIAS_M)
         return T_CE
+
+    def _set_T_CE(self, T_CE_yaml: np.ndarray):
+        self.T_CE = T_CE_yaml
+        self.T_CE_runtime = self._make_runtime_T_CE(self.T_CE)
+
+    def _log_T_CE(self, action: str):
+        self.get_logger().info(
+            f"[T_CE] {action}: yaml_t=[{self.T_CE[0,3]:.4f} "
+            f"{self.T_CE[1,3]:.4f} {self.T_CE[2,3]:.4f}] "
+            f"runtime_t=[{self.T_CE_runtime[0,3]:.4f} "
+            f"{self.T_CE_runtime[1,3]:.4f} {self.T_CE_runtime[2,3]:.4f}] "
+            f"z_bias={T_CE_RUNTIME_Z_BIAS_M:.4f}"
+        )
 
     def _load_z_residual(self, node):
         disabled = {"enabled": False}
@@ -700,7 +721,7 @@ class ViveTracker(Node):
 
             # Final constant offset. Keep this last so T_CE shifts the final published pose.
             if self.apply_T_CE_extra:
-                M_cal = M_cal @ self._runtime_T_CE()
+                M_cal = M_cal @ self.T_CE_runtime
 
             # pose로
             raw_pose = matrix_to_pose(raw_M)

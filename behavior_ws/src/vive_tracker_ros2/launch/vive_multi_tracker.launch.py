@@ -37,7 +37,7 @@ def generate_launch_description():
             parameters=[
                 {
                     "publish_tf": publish_tf,
-                    "tool_correction_mode": "t_bc",
+                    "tool_correction_mode": "none",
                     "apply_T_CE_extra": True,
                     "base_frame": base_frame,
                     "child_frame": child_frame
