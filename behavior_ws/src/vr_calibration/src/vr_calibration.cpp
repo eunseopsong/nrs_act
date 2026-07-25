@@ -472,6 +472,7 @@ public:
           RCLCPP_INFO(get_logger(),
             "[IN] d=%.2fmm a=%.2fdeg",
             dist_mm, ang_deg);
+          logTargetPose("IN", wp_idx, target_pose);
         }
         rate.sleep();
         continue;
@@ -947,6 +948,18 @@ private:
 
     const double ang_rad = rotAngleBetweenRad(Rt, Rc);
     return rad2deg(ang_rad);
+  }
+
+  void logTargetPose(const char* tag,
+                     size_t wp_idx,
+                     const std::array<double,6>& target_pose) const
+  {
+    RCLCPP_INFO(get_logger(),
+      "[%s_TARGET] wp=%zu p_mm=[%.3f %.3f %.3f] rot_%s=[%.3f %.3f %.3f]",
+      tag, wp_idx+1,
+      target_pose[0], target_pose[1], target_pose[2],
+      wp_rotvec_in_degrees_ ? "deg" : "rad",
+      target_pose[3], target_pose[4], target_pose[5]);
   }
 
   // ---------- motion detector ----------
@@ -1507,6 +1520,7 @@ private:
     RCLCPP_INFO(get_logger(),
       "[CAPTURE] d=%.2fmm a=%.2fdeg",
       dist_mm, ang_deg);
+    logTargetPose("CAPTURE", wp_idx, waypoints_[wp_idx].pose);
     RCLCPP_INFO(get_logger(),
       "[CAPTURE] v=%.2fmm/s w=%.2fdeg/s",
       last_vnorm_mms_, last_omega_dps_);

@@ -15,7 +15,9 @@ def generate_launch_description():
                     {
                         "base_frame": "base_link",
                         "child_frame": "vive_tracker",
-                        "publish_tf": True
+                        "publish_tf": True,
+                        "tool_correction_mode": "t_bc",
+                        "apply_T_CE_extra": True
                     },
                 ],
             ),

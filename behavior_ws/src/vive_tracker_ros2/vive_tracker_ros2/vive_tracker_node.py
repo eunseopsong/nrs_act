@@ -200,7 +200,7 @@ class ViveTracker(Node):
         # t_bc: publish EE/TCP pose by removing solved EE->tracker offset
         # t_ce: legacy alias; final T_CE is applied after all other corrections
         # none: publish calibrated tracker/world pose before final T_CE
-        self.declare_parameter("tool_correction_mode", "none")
+        self.declare_parameter("tool_correction_mode", "t_bc")
         self.declare_parameter("apply_T_CE_extra", True)
 
         # --- rotvec 연속화 (π 근처 튐 완화)
