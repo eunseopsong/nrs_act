@@ -111,6 +111,7 @@ best window는 VR position std, robot linear/angular velocity, target dist/angle
 - VR position: clean sample 평균
 - VR orientation: quaternion sign-align 평균
 - VR position std가 `capture_max_vr_std_mm`를 넘으면 캡처를 보류
+- target을 떠나는 순간에도 clean buffer가 이미 유효하면 `[OUT_CAPTURE]`로 그 window를 저장하고 다음 target으로 진행한다.
 - `T_FIX` 뒤에도 XY 위치별 Z 오차가 남으면 `Z_RESIDUAL` quadratic_xy 모델을 저장한다.
   runtime은 이 모델이 있으면 `T_FIX` 적용 직후 z값만 `z += f(x,y)`로 보정한다.
 

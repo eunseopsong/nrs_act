@@ -482,20 +482,42 @@ public:
       }
 
       if (dist_mm >= pos_exit_mm_ || ang_deg >= ori_exit_deg_) {
+        std::array<double,6> cp_avg;
+        std::array<double,7> vr_avg;
+        double dist_avg_mm = 0.0;
+        double ang_avg_deg = 0.0;
+        CaptureWindowStats capture_stats;
+
+        if (!clean_capture_samples_.empty() &&
+            makeCleanCaptureAverage(target_pose, cp_avg, vr_avg, dist_avg_mm, ang_avg_deg,
+                                    &capture_stats)) {
+          RCLCPP_WARN(get_logger(),
+            "[OUT_CAPTURE] leaving wp=%zu d=%.2fmm a=%.2fdeg; using buffered clean window",
+            wp_idx+1, dist_mm, ang_deg);
+          captureOnce(target_k, wp_idx, cp_avg, vr_avg, dist_avg_mm, ang_avg_deg,
+                      capture_stats.avg_v_mms, capture_stats.avg_w_dps);
+
+          target_k++;
+          state = State::WAIT_ENTER;
+          target_start_time = tnow();
+          resetMotionDetector();
+          resetCleanCaptureBuffer();
+          hold_active = false;
+          rate.sleep();
+          continue;
+        }
+
         state = State::WAIT_ENTER;
         hold_active = false;
         resetMotionDetector();
+        const size_t dropped_samples = clean_capture_samples_.size();
+        const double dropped_window_s = cleanCaptureWindowS();
         resetCleanCaptureBuffer();
         RCLCPP_WARN(get_logger(),
-          "[OUT] d=%.2fmm a=%.2fdeg",
-          dist_mm, ang_deg);
+          "[OUT] d=%.2fmm a=%.2fdeg n=%zu win=%.3fs",
+          dist_mm, ang_deg, dropped_samples, dropped_window_s);
         rate.sleep();
         continue;
-      }
-
-      if (!(dist_mm <= pos_enter_mm_ && ang_deg <= ori_enter_deg_)) {
-        hold_active = false;
-        resetCleanCaptureBuffer();
       }
 
       if (!(dist_mm <= pos_enter_mm_ && ang_deg <= ori_enter_deg_)) {
@@ -522,7 +544,11 @@ public:
           std::array<double,7> vr_avg;
           double dist_avg_mm = 0.0;
           double ang_avg_deg = 0.0;
-          if (!makeCleanCaptureAverage(target_pose, cp_avg, vr_avg, dist_avg_mm, ang_avg_deg)) {
+          CaptureWindowStats capture_stats;
+          bool have_capture_stats = true;
+          if (!makeCleanCaptureAverage(target_pose, cp_avg, vr_avg, dist_avg_mm, ang_avg_deg,
+                                       &capture_stats)) {
+            have_capture_stats = false;
             if (held < hold_time_s_) {
               RCLCPP_WARN_THROTTLE(
                 get_logger(), steady_clock_, 2000,
@@ -546,7 +572,9 @@ public:
             }
           }
 
-          captureOnce(target_k, wp_idx, cp_avg, vr_avg, dist_avg_mm, ang_avg_deg);
+          captureOnce(target_k, wp_idx, cp_avg, vr_avg, dist_avg_mm, ang_avg_deg,
+                      have_capture_stats ? capture_stats.avg_v_mms : std::numeric_limits<double>::quiet_NaN(),
+                      have_capture_stats ? capture_stats.avg_w_dps : std::numeric_limits<double>::quiet_NaN());
 
           target_k++;
           state = State::WAIT_ENTER;
@@ -1225,7 +1253,8 @@ private:
                                std::array<double,6>& cp_avg,
                                std::array<double,7>& vr_avg,
                                double& dist_avg_mm,
-                               double& ang_avg_deg)
+                               double& ang_avg_deg,
+                               CaptureWindowStats* selected_stats = nullptr)
   {
     const size_t N = clean_capture_samples_.size();
     if (N < capture_min_clean_samples_) return false;
@@ -1277,6 +1306,10 @@ private:
       "[BEST] d=%.2fmm a=%.2fdeg",
       best_stats.avg_dist_mm,
       best_stats.avg_ang_deg);
+
+    if (selected_stats) {
+      *selected_stats = best_stats;
+    }
 
     return averageCaptureSampleRange(target_pose, best_first_idx, best_last_idx, true, "CLEAN_CAPTURE",
                                      cp_avg, vr_avg, dist_avg_mm, ang_avg_deg);
@@ -1470,7 +1503,9 @@ private:
   void captureOnce(size_t target_k, size_t wp_idx,
                    const std::array<double,6>& cp,
                    const std::array<double,7>& vr,
-                   double dist_mm, double ang_deg)
+                   double dist_mm, double ang_deg,
+                   double v_log_mms = std::numeric_limits<double>::quiet_NaN(),
+                   double w_log_dps = std::numeric_limits<double>::quiet_NaN())
   {
     // --- EE rotation from rotvec ---
     const auto w_c = toRotvecRad_CP(cp);
@@ -1521,9 +1556,12 @@ private:
       "[CAPTURE] d=%.2fmm a=%.2fdeg",
       dist_mm, ang_deg);
     logTargetPose("CAPTURE", wp_idx, waypoints_[wp_idx].pose);
+    const double v_for_log = std::isfinite(v_log_mms) ? v_log_mms : last_vnorm_mms_;
+    const double w_for_log = std::isfinite(w_log_dps) ? w_log_dps : last_omega_dps_;
+
     RCLCPP_INFO(get_logger(),
       "[CAPTURE] v=%.2fmm/s w=%.2fdeg/s",
-      last_vnorm_mms_, last_omega_dps_);
+      v_for_log, w_for_log);
   }
 
   // ---------- YAML read (constants) ----------
