@@ -60,7 +60,9 @@ def masked_mean_pool_feature_map(
         raise ValueError(f"empty_stain_feature_mode must be zero or global, got: {empty_mode}")
 
     mask = prepare_stain_mask(stain_mask, threshold=threshold).to(device=feature_map.device, dtype=feature_map.dtype)
-    mask_small = F.interpolate(mask, size=feature_map.shape[-2:], mode="nearest")
+    # Area downsampling preserves narrow ROIs that can fall entirely between
+    # nearest-neighbor sample locations on a low-resolution feature map.
+    mask_small = F.interpolate(mask, size=feature_map.shape[-2:], mode="area")
     mask_sum = mask_small.sum(dim=(2, 3))
 
     pooled = (feature_map * mask_small).sum(dim=(2, 3)) / mask_sum.clamp_min(float(eps))

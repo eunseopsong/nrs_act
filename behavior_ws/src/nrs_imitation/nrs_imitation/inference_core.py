@@ -1140,7 +1140,8 @@ class NodeCmdMotionInfer(Node):
         self.declare_parameter("resize_hw", 0)
         self.declare_parameter("debug_every_n", 30)
 
-        # force safety
+        # Force-command upper limit. Values <= 0 disable only the upper limit;
+        # the final command remains non-negative.
         self.declare_parameter("fz_hard_limit", 30.0)
 
         # Demo-start alignment.
@@ -1547,6 +1548,11 @@ class NodeCmdMotionInfer(Node):
         # device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.get_logger().info(f"[INFO] Using device: {self.device}")
+        fz_limit_desc = (
+            f"{self.fz_hard_limit:.3f}N"
+            if self.fz_hard_limit > 0.0
+            else "disabled"
+        )
         self.get_logger().info(
             f"[CAM] preprocess_mode={self.camera_preprocess_mode}, "
             f"obs_mode={self.obs_mode}, camera_names={self.camera_names}, "
@@ -1851,6 +1857,7 @@ class NodeCmdMotionInfer(Node):
             f"  temporal_agg={int(self.use_temporal_agg)} mode={self.temporal_agg_mode} tau_steps={self.temporal_agg_tau_steps} max_plans={self.max_plans}\n"
             f"  contact_gate(on={self.contact_on_thr}, off={self.contact_off_thr}) clear_on_change={int(self.clear_plans_on_contact_change)}\n"
             f"  force_xy_cmd(enable={int(self.force_xy_cmd_enable)}, hard_limit={self.force_xy_hard_limit}N)\n"
+            f"  force_z_cmd(upper_limit={fz_limit_desc}, nonnegative=1)\n"
             f"  touch(delta={int(self.touch_use_delta)}, thr={self.touch_fz_thr}, ok={self.touch_ok_count}, min_after={self.touch_min_after_start_sec}s, base_tau={self.touch_baseline_tau_sec}s)\n"
             f"  PRELOAD(removed: bypass APPROACH -> TRACK, nominal_src={self.preload_target_source}, nominal_min={self.preload_min_N}N)\n"
             f"  STALL(win_sec={self.stall_sec}, min_after={self.stall_min_after_start_sec}s, lpf_tau={self.stall_lpf_tau_sec}s, net_eps_pos={self.stall_window_net_pos_eps_mm}mm, net_eps_ang={self.stall_window_net_ang_eps_rad}rad)\n"
@@ -2977,7 +2984,8 @@ class NodeCmdMotionInfer(Node):
                 seq_den[:, 6:8] = np.clip(seq_den[:, 6:8], -lim_xy, lim_xy)
             else:
                 seq_den[:, 6:8] = 0.0
-            seq_den[:, 8] = np.clip(seq_den[:, 8], -self.fz_hard_limit, self.fz_hard_limit)
+            if self.fz_hard_limit > 0.0:
+                seq_den[:, 8] = np.clip(seq_den[:, 8], -self.fz_hard_limit, self.fz_hard_limit)
 
         except Exception as e:
             self.get_logger().error(f"[INFER] policy forward failed: {e}")
@@ -3271,7 +3279,9 @@ class NodeCmdMotionInfer(Node):
             prev_fz = float(self.prev_cmd[8]) if (self.prev_cmd is not None) else 0.0
             cmd[8] = float(prev_fz)
 
-        cmd[8] = float(np.clip(cmd[8], 0.0, self.fz_hard_limit))
+        cmd[8] = float(max(0.0, cmd[8]))
+        if self.fz_hard_limit > 0.0:
+            cmd[8] = float(min(cmd[8], self.fz_hard_limit))
         return cmd
 
     # ------------------------------------------------------------
@@ -3717,7 +3727,9 @@ class NodeCmdMotionInfer(Node):
             cmd_target[6] = 0.0
             cmd_target[7] = 0.0
 
-        cmd_target[8] = float(np.clip(cmd_target[8], 0.0, self.fz_hard_limit))
+        cmd_target[8] = float(max(0.0, cmd_target[8]))
+        if self.fz_hard_limit > 0.0:
+            cmd_target[8] = float(min(cmd_target[8], self.fz_hard_limit))
 
         # -----------------------------
         # STALL check
@@ -3808,7 +3820,9 @@ class NodeCmdMotionInfer(Node):
         if self._fz_kick_active:
             cmd_target[8] = float(max(cmd_target[8], self.fz_kick_N))
 
-        cmd_target[8] = float(np.clip(cmd_target[8], 0.0, self.fz_hard_limit))
+        cmd_target[8] = float(max(0.0, cmd_target[8]))
+        if self.fz_hard_limit > 0.0:
+            cmd_target[8] = float(min(cmd_target[8], self.fz_hard_limit))
 
         # -----------------------------
         # QP-safe slow-follow

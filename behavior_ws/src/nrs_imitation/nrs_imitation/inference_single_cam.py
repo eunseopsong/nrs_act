@@ -28,7 +28,9 @@ DEFAULT_ROS_ARGS = [
     "-p", "step_cap_pos_mm:=0.05",
     "-p", "step_cap_ang_rad:=0.0001",
     "-p", "step_cap_fz:=0.05",
-    "-p", "fz_hard_limit:=30.0",
+    # Disable the Fz command upper clamp for single-camera policies. The
+    # non-negative guard and per-control-step slew cap remain active.
+    "-p", "fz_hard_limit:=0.0",
     "-p", "infer_hz:=5.0",
     "-p", "control_hz:=125.0",
     "-p", "temporal_agg_tau_steps:=20.0",
