@@ -103,7 +103,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resample_each_epoch", dest="resample_each_epoch", action="store_true", default=True)
     parser.add_argument("--no_resample_each_epoch", dest="resample_each_epoch", action="store_false")
 
-    parser.add_argument("--use_stain_mask", dest="use_stain_mask", action="store_true", default=True)
+    parser.add_argument("--use_stain_mask", dest="use_stain_mask", action="store_true", default=False)
     parser.add_argument("--no_stain_mask", dest="use_stain_mask", action="store_false")
     parser.add_argument("--stain_mask_key", type=str, default="observations/images/stain_mask")
     parser.add_argument("--stain_pooling_type", type=str, default="masked_mean", choices=["masked_mean"])
