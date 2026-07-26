@@ -41,6 +41,19 @@ static inline double clampd(double x, double lo, double hi)
   return x;
 }
 
+static double medianValue(std::vector<double> values)
+{
+  if (values.empty()) return 0.0;
+
+  const size_t mid = values.size() / 2;
+  std::nth_element(values.begin(), values.begin() + mid, values.end());
+  const double hi = values[mid];
+  if (values.size() % 2 == 1) return hi;
+
+  std::nth_element(values.begin(), values.begin() + mid - 1, values.begin() + mid);
+  return 0.5 * (values[mid - 1] + hi);
+}
+
 // local time string: "YYYY.MM.DD HH:MM"
 static std::string nowLocalString()
 {
@@ -282,6 +295,11 @@ public:
     this->declare_parameter<bool>("handeye_auto_trim_low_rotation_prefix", true);
     this->declare_parameter<double>("handeye_prefix_rotation_span_deg", 5.0);
     this->declare_parameter<int>("handeye_min_trim_prefix_samples", 4);
+    this->declare_parameter<bool>("handeye_outlier_reject_enable", true);
+    this->declare_parameter<int>("handeye_outlier_max_reject", 2);
+    this->declare_parameter<int>("handeye_outlier_min_samples", 8);
+    this->declare_parameter<double>("handeye_outlier_abs_mm", 15.0);
+    this->declare_parameter<double>("handeye_outlier_mad_sigma", 4.0);
 
     t_sa_w_des_z_        = this->get_parameter("t_sa_w_des_z").as_double();
     t_sa_wait_timeout_s_ = this->get_parameter("t_sa_wait_timeout_s").as_double();
@@ -322,6 +340,16 @@ public:
       std::max(0.0, this->get_parameter("handeye_prefix_rotation_span_deg").as_double());
     handeye_min_trim_prefix_samples_ =
       static_cast<size_t>(std::max<int64_t>(1, this->get_parameter("handeye_min_trim_prefix_samples").as_int()));
+    handeye_outlier_reject_enable_ =
+      this->get_parameter("handeye_outlier_reject_enable").as_bool();
+    handeye_outlier_max_reject_ =
+      static_cast<size_t>(std::max<int64_t>(0, this->get_parameter("handeye_outlier_max_reject").as_int()));
+    handeye_outlier_min_samples_ =
+      static_cast<size_t>(std::max<int64_t>(3, this->get_parameter("handeye_outlier_min_samples").as_int()));
+    handeye_outlier_abs_mm_ =
+      std::max(0.0, this->get_parameter("handeye_outlier_abs_mm").as_double());
+    handeye_outlier_mad_sigma_ =
+      std::max(0.0, this->get_parameter("handeye_outlier_mad_sigma").as_double());
 
     // ----------------------------
     // Waypoints
@@ -393,6 +421,13 @@ public:
       handeye_auto_trim_low_rotation_prefix_ ? "true" : "false",
       handeye_prefix_rotation_span_deg_,
       handeye_min_trim_prefix_samples_);
+    RCLCPP_INFO(get_logger(),
+      "[OUTLIER] en=%s max=%zu min_samples=%zu abs>%.1fmm mad=%.1f",
+      handeye_outlier_reject_enable_ ? "true" : "false",
+      handeye_outlier_max_reject_,
+      handeye_outlier_min_samples_,
+      handeye_outlier_abs_mm_,
+      handeye_outlier_mad_sigma_);
   }
 
   void run()
@@ -638,6 +673,13 @@ private:
   bool handeye_auto_trim_low_rotation_prefix_{true};
   double handeye_prefix_rotation_span_deg_{5.0};
   size_t handeye_min_trim_prefix_samples_{4};
+  bool handeye_outlier_reject_enable_{true};
+  size_t handeye_outlier_max_reject_{2};
+  size_t handeye_outlier_min_samples_{8};
+  double handeye_outlier_abs_mm_{15.0};
+  double handeye_outlier_mad_sigma_{4.0};
+  bool handeye_outlier_reject_active_{false};
+  size_t handeye_outlier_rejected_count_{0};
 
   // ✅ NEW
   std::string t_sa_mode_{"update"};   // keep/update
@@ -757,6 +799,7 @@ private:
   // store all captured samples for T_BC / T_AD
   std::vector<Eigen::Matrix4d> T_AB_all_; // arm
   std::vector<Eigen::Matrix4d> T_DC_all_; // tracker
+  std::vector<size_t> sample_wp_indices_;
 
   // storage for finalize step
   std::vector<Eigen::Vector3d> O_B0B1_list_;
@@ -1548,6 +1591,7 @@ private:
     Eigen::Matrix3d R_dc = q_vr.toRotationMatrix();
     Eigen::Vector3d p_dc(vr_x, vr_y, vr_z);
     T_DC_all_.push_back(makeT(R_dc, p_dc));
+    sample_wp_indices_.push_back(wp_idx);
 
     RCLCPP_INFO(get_logger(),
       "[CAPTURE] target %zu/%zu wp=%zu",
@@ -1827,6 +1871,93 @@ private:
     return out;
   }
 
+  std::vector<double> computeCalibrationPositionResidualsMm(const Eigen::Matrix4d& T_AD,
+                                                            const Eigen::Matrix3d& R_Adj,
+                                                            const Eigen::Matrix4d& T_BC,
+                                                            const Eigen::Matrix4d& T_FIX,
+                                                            bool apply_z_residual) const
+  {
+    const size_t N = T_AB_all_.size();
+    if (N == 0 || T_DC_all_.size() != N) {
+      return {};
+    }
+
+    Eigen::Matrix4d T_Adj = Eigen::Matrix4d::Identity();
+    T_Adj.block<3,3>(0,0) = R_Adj.transpose();
+    const Eigen::Matrix4d T_CB = invT(T_BC);
+
+    std::vector<double> residuals_mm;
+    residuals_mm.reserve(N);
+    for (size_t i=0; i<N; ++i) {
+      const Eigen::Matrix4d M_cal = T_FIX * T_AD * T_Adj * T_DC_all_[i] * T_CB;
+      Eigen::Vector3d p_cal = M_cal.block<3,1>(0,3);
+      if (apply_z_residual) {
+        p_cal.z() += evalZResidualCorrectionM(z_residual_model_, p_cal.x(), p_cal.y());
+      }
+      const Eigen::Vector3d p_ref = T_AB_all_[i].block<3,1>(0,3);
+      residuals_mm.push_back((p_ref - p_cal).norm() * 1000.0);
+    }
+    return residuals_mm;
+  }
+
+  bool rejectWorstHandeyeOutlier(const Eigen::Matrix4d& T_AD,
+                                 const Eigen::Matrix3d& R_Adj,
+                                 const Eigen::Matrix4d& T_BC)
+  {
+    const size_t N = T_AB_all_.size();
+    if (!handeye_outlier_reject_enable_ || handeye_outlier_max_reject_ == 0) return false;
+    if (handeye_outlier_rejected_count_ >= handeye_outlier_max_reject_) return false;
+    if (N <= handeye_outlier_min_samples_ || T_DC_all_.size() != N) return false;
+
+    const Eigen::Matrix4d T_FIX_identity = Eigen::Matrix4d::Identity();
+    const std::vector<double> residuals_mm =
+      computeCalibrationPositionResidualsMm(T_AD, R_Adj, T_BC, T_FIX_identity, false);
+    if (residuals_mm.size() != N) return false;
+
+    const auto worst_it = std::max_element(residuals_mm.begin(), residuals_mm.end());
+    const size_t worst_i = static_cast<size_t>(std::distance(residuals_mm.begin(), worst_it));
+    const double worst_mm = *worst_it;
+    const double median_mm = medianValue(residuals_mm);
+
+    std::vector<double> abs_dev;
+    abs_dev.reserve(N);
+    for (double err_mm : residuals_mm) {
+      abs_dev.push_back(std::fabs(err_mm - median_mm));
+    }
+    const double mad_mm = medianValue(abs_dev);
+    const double robust_sigma_mm = 1.4826 * mad_mm;
+    const double robust_threshold_mm =
+      median_mm + handeye_outlier_mad_sigma_ * robust_sigma_mm;
+    const double threshold_mm = std::max(handeye_outlier_abs_mm_, robust_threshold_mm);
+
+    if (worst_mm <= threshold_mm) {
+      RCLCPP_INFO(get_logger(),
+        "[OUTLIER] keep all n=%zu worst=%.3fmm median=%.3fmm thr=%.3fmm",
+        N, worst_mm, median_mm, threshold_mm);
+      return false;
+    }
+
+    const bool have_wp_ids = (sample_wp_indices_.size() == N);
+    const size_t wp_idx = have_wp_ids ? sample_wp_indices_[worst_i] : worst_i;
+    RCLCPP_WARN(get_logger(),
+      "[OUTLIER] reject sample=%zu/%zu wp=%zu err=%.3fmm median=%.3fmm thr=%.3fmm rejected=%zu/%zu",
+      worst_i + 1, N,
+      have_wp_ids ? (wp_idx + 1) : 0,
+      worst_mm, median_mm, threshold_mm,
+      handeye_outlier_rejected_count_ + 1,
+      handeye_outlier_max_reject_);
+
+    T_AB_all_.erase(T_AB_all_.begin() + static_cast<std::ptrdiff_t>(worst_i));
+    T_DC_all_.erase(T_DC_all_.begin() + static_cast<std::ptrdiff_t>(worst_i));
+    if (have_wp_ids) {
+      sample_wp_indices_.erase(sample_wp_indices_.begin() + static_cast<std::ptrdiff_t>(worst_i));
+    } else {
+      sample_wp_indices_.clear();
+    }
+    handeye_outlier_rejected_count_++;
+    return true;
+  }
+
   ZResidualModel computeZResidualModel(const Eigen::Matrix4d& T_AD,
                                        const Eigen::Matrix3d& R_Adj,
                                        const Eigen::Matrix4d& T_BC,
@@ -1981,9 +2112,11 @@ private:
     RCLCPP_INFO(get_logger(),
       "[VALID] rms=%.3fmm max=%.3fmm",
       rms_mm, max_err * 1000.0);
+    const bool have_wp_ids = (sample_wp_indices_.size() == N);
     RCLCPP_INFO(get_logger(),
-      "[VALID] max_sample=%zu/%zu",
-      max_i + 1, N);
+      "[VALID] max_sample=%zu/%zu wp=%zu",
+      max_i + 1, N,
+      have_wp_ids ? (sample_wp_indices_[max_i] + 1) : 0);
     RCLCPP_INFO(get_logger(),
       "[VALID] max_ref=[%.1f %.1f %.1f]mm cal=[%.1f %.1f %.1f]mm err=[%.1f %.1f %.1f]mm",
       max_p_ref.x() * 1000.0, max_p_ref.y() * 1000.0, max_p_ref.z() * 1000.0,
@@ -2036,6 +2169,28 @@ private:
 
   // ---------- compute T_BC / T_AD_avg and save yaml ----------
   void finalizeCalibrationAndSaveYaml()
+  {
+    const bool outermost = !handeye_outlier_reject_active_;
+    if (outermost) {
+      handeye_outlier_reject_active_ = true;
+      handeye_outlier_rejected_count_ = 0;
+    }
+
+    try {
+      finalizeCalibrationAndSaveYamlImpl();
+    } catch (...) {
+      if (outermost) {
+        handeye_outlier_reject_active_ = false;
+      }
+      throw;
+    }
+
+    if (outermost) {
+      handeye_outlier_reject_active_ = false;
+    }
+  }
+
+  void finalizeCalibrationAndSaveYamlImpl()
   {
     const size_t N_all = T_AB_all_.size();
     if (N_all < 2 || T_DC_all_.size() != N_all) {
@@ -2205,6 +2360,14 @@ private:
       alt.sign,
       alt.fit_rms_m * 1000.0);
 
+    if (rejectWorstHandeyeOutlier(
+          best.T_AD_avg,
+          have_radj_ ? R_adj_ : Eigen::Matrix3d::Identity(),
+          best.T_BC)) {
+      finalizeCalibrationAndSaveYamlImpl();
+      return;
+    }
+
     const Eigen::Matrix4d T_BC = best.T_BC;
     const Eigen::Matrix4d T_AD_avg = best.T_AD_avg;
     T_FIX_ = computeZPlaneFix(
@@ -2279,6 +2442,14 @@ private:
     ofs << "  z_residual_enable: " << (z_residual_enable_ ? "true" : "false") << "\n";
     ofs << "  z_residual_max_correction_mm: " << std::fixed << std::setprecision(prec)
         << z_residual_max_correction_m_ * 1000.0 << "\n";
+    ofs << "  handeye_outlier_reject_enable: " << (handeye_outlier_reject_enable_ ? "true" : "false") << "\n";
+    ofs << "  handeye_outlier_max_reject: " << handeye_outlier_max_reject_ << "\n";
+    ofs << "  handeye_outlier_abs_mm: " << std::fixed << std::setprecision(prec)
+        << handeye_outlier_abs_mm_ << "\n";
+    ofs << "  handeye_outlier_mad_sigma: " << std::fixed << std::setprecision(prec)
+        << handeye_outlier_mad_sigma_ << "\n";
+    ofs << "  handeye_outlier_rejected_count: " << handeye_outlier_rejected_count_ << "\n";
+    ofs << "  handeye_used_samples: " << T_AB_all_.size() << "\n";
     ofs << "  note: \"Runtime tool correction uses inv(T_BC); T_SA is right-multiplied.\"\n\n";
 
     auto writeMat4 = [&](const std::string& key, const Eigen::Matrix4d& T){
