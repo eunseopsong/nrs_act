@@ -174,6 +174,80 @@ def _ensure_stain_mask4(arr: np.ndarray) -> np.ndarray:
     return arr
 
 
+def generate_fixed_tcp_roi_mask(
+    images_rgb: np.ndarray,
+    *,
+    reference_width: int = 424,
+    reference_height: int = 240,
+    center_x: int = 253,
+    center_y: int = 120,
+    area_fraction: float = 0.10,
+    x0: int = 221,
+    x1: int = 286,
+    y0: int = 40,
+    y1: int = 156,
+) -> np.ndarray:
+    """
+    Generate a persistent image-space ROI around the eye-in-hand camera TCP.
+
+    When area_fraction is positive, make a square centered on the configured
+    TCP pixel whose area is closest to that fraction of the full image. The
+    TCP center is authored at the reference resolution and scaled if needed.
+    Setting area_fraction to zero restores explicit half-open bounds
+    [x0, x1), [y0, y1).
+
+    Every frame, including clean/reference episodes, receives the same ROI
+    because this mask represents the local TCP interaction area rather than
+    stain presence.
+    """
+    images = _ensure_image4(images_rgb, "cam0")
+    T, height, width, _ = images.shape
+
+    ref_w = int(reference_width)
+    ref_h = int(reference_height)
+    if ref_w <= 0 or ref_h <= 0:
+        raise ValueError(
+            f"TCP ROI reference resolution must be positive, got {ref_w}x{ref_h}"
+        )
+    scale_x = float(width) / float(ref_w)
+    scale_y = float(height) / float(ref_h)
+
+    fraction = float(area_fraction)
+    if fraction > 0.0:
+        if fraction > 1.0:
+            raise ValueError(f"TCP ROI area_fraction must be <= 1, got {fraction}")
+        side = max(1, int(round(np.sqrt(fraction * float(width * height)))))
+        side = min(side, width, height)
+        cx = int(round(int(center_x) * scale_x))
+        cy = int(round(int(center_y) * scale_y))
+
+        sx0 = cx - side // 2
+        sy0 = cy - side // 2
+        sx0 = min(max(0, sx0), width - side)
+        sy0 = min(max(0, sy0), height - side)
+        sx1 = sx0 + side
+        sy1 = sy0 + side
+    else:
+        if int(x1) <= int(x0) or int(y1) <= int(y0):
+            raise ValueError(
+                "TCP ROI requires half-open bounds with x1>x0 and y1>y0, "
+                f"got x=[{x0},{x1}), y=[{y0},{y1})"
+            )
+        sx0 = max(0, min(width, int(round(int(x0) * scale_x))))
+        sx1 = max(0, min(width, int(round(int(x1) * scale_x))))
+        sy0 = max(0, min(height, int(round(int(y0) * scale_y))))
+        sy1 = max(0, min(height, int(round(int(y1) * scale_y))))
+    if sx1 <= sx0 or sy1 <= sy0:
+        raise ValueError(
+            "Scaled TCP ROI is empty: "
+            f"image={width}x{height}, x=[{sx0},{sx1}), y=[{sy0},{sy1})"
+        )
+
+    mask = np.zeros((T, height, width, 1), dtype=np.uint8)
+    mask[:, sy0:sy1, sx0:sx1, 0] = 255
+    return mask
+
+
 def _ensure_vector1(arr: np.ndarray, name: str) -> np.ndarray:
     arr = np.asarray(arr)
     if arr.ndim == 0:
@@ -1533,6 +1607,7 @@ def write_episode(
     gzip_level: int,
     orig_len: int,
     truncated: bool,
+    mask_metadata: Optional[Dict[str, object]] = None,
 ) -> None:
     if out_path.exists():
         out_path.unlink()
@@ -1549,6 +1624,9 @@ def write_episode(
         f.attrs["has_gripper"] = int(bool(has_gripper))
         f.attrs["qpos_dim"] = 9
         f.attrs["action_dim"] = 11 if has_gripper else 9
+        if mask_metadata:
+            for key, value in mask_metadata.items():
+                f.attrs[f"mask_{key}"] = value
 
         g_action = f.create_group("action")
         g_action.create_dataset("position", data=data["position"].astype(np.float32), **kwargs)
@@ -1598,6 +1676,9 @@ def write_episode(
                 ds.attrs["shape_convention"] = "T,H,W,1"
                 ds.attrs["storage"] = "uint8_0_255"
                 ds.attrs["model_value_range_after_div255"] = "float32_0_1"
+                if mask_metadata:
+                    for key, value in mask_metadata.items():
+                        ds.attrs[key] = value
                 f.attrs["has_stain_mask"] = 1
             else:
                 g_images.create_dataset(name, data=data[name].astype(np.uint8), **kwargs)
@@ -1616,7 +1697,7 @@ def _attr_to_bool(value, default: bool = False) -> bool:
 
 def _resolve_stain_mask_mode(f: h5py.File, requested_mode: str) -> str:
     mode = str(requested_mode or "auto").strip().lower()
-    if mode not in ("auto", "copy", "reference_episode", "none"):
+    if mode not in ("auto", "copy", "reference_episode", "tcp_roi", "none"):
         raise ValueError(f"Unsupported stain_mask_mode={requested_mode}")
     if mode != "auto":
         return mode
@@ -1659,6 +1740,15 @@ def convert_merged_h5(
     stain_mask_mode: str = "auto",
     stain_reference_episode: str = "ep_0000",
     stain_exclude_reference_episode: bool = True,
+    tcp_roi_reference_width: int = 424,
+    tcp_roi_reference_height: int = 240,
+    tcp_roi_center_x: int = 253,
+    tcp_roi_center_y: int = 120,
+    tcp_roi_area_fraction: float = 0.10,
+    tcp_roi_x0: int = 221,
+    tcp_roi_x1: int = 286,
+    tcp_roi_y0: int = 40,
+    tcp_roi_y1: int = 156,
     stain_diff_thresh: float = 18.0,
     stain_dark_thresh: float = 165.0,
     reflection_v_thresh: float = 235.0,
@@ -1740,6 +1830,32 @@ def convert_merged_h5(
             raise RuntimeError(f"No episodes found under {input_h5}/episodes")
 
         effective_stain_mode = _resolve_stain_mask_mode(f, stain_mask_mode)
+        mask_metadata: Optional[Dict[str, object]] = None
+        if effective_stain_mode == "tcp_roi":
+            square_mode = float(tcp_roi_area_fraction) > 0.0
+            mask_metadata = {
+                "semantics": (
+                    "tcp_centered_square_interaction_roi"
+                    if square_mode
+                    else "tcp_fixed_interaction_roi"
+                ),
+                "shape": "square" if square_mode else "rectangle",
+                "reference_width": int(tcp_roi_reference_width),
+                "reference_height": int(tcp_roi_reference_height),
+                "center_x": int(tcp_roi_center_x),
+                "center_y": int(tcp_roi_center_y),
+                "target_area_fraction": float(tcp_roi_area_fraction),
+            }
+            if not square_mode:
+                mask_metadata.update(
+                    {
+                        "coordinate_convention": "half_open_xyxy",
+                        "x0": int(tcp_roi_x0),
+                        "x1": int(tcp_roi_x1),
+                        "y0": int(tcp_roi_y0),
+                        "y1": int(tcp_roi_y1),
+                    }
+                )
         reference_ep_name = ""
         reference_data = None
         if effective_stain_mode == "reference_episode":
@@ -1756,6 +1872,21 @@ def convert_merged_h5(
         print(f"[INFO] include_gripper= {int(bool(include_gripper))}")
         print(f"[INFO] episodes found = {len(ep_names)}")
         print(f"[INFO] stain_mode     = {effective_stain_mode}")
+        if effective_stain_mode == "tcp_roi":
+            if float(tcp_roi_area_fraction) > 0.0:
+                print(
+                    "[INFO] tcp_roi        = "
+                    f"ref={int(tcp_roi_reference_width)}x{int(tcp_roi_reference_height)}, "
+                    f"center=({int(tcp_roi_center_x)},{int(tcp_roi_center_y)}), "
+                    f"square_area_fraction={float(tcp_roi_area_fraction):.6f}"
+                )
+            else:
+                print(
+                    "[INFO] tcp_roi        = "
+                    f"ref={int(tcp_roi_reference_width)}x{int(tcp_roi_reference_height)}, "
+                    f"x=[{int(tcp_roi_x0)},{int(tcp_roi_x1)}), "
+                    f"y=[{int(tcp_roi_y0)},{int(tcp_roi_y1)})"
+                )
         if reference_ep_name:
             print(f"[INFO] stain_ref_ep   = {reference_ep_name} (exclude={int(bool(stain_exclude_reference_episode))})")
 
@@ -1777,6 +1908,19 @@ def convert_merged_h5(
                 )
                 if effective_stain_mode == "none" and "stain_mask" in data:
                     del data["stain_mask"]
+                elif effective_stain_mode == "tcp_roi":
+                    data["stain_mask"] = generate_fixed_tcp_roi_mask(
+                        data["cam0"],
+                        reference_width=tcp_roi_reference_width,
+                        reference_height=tcp_roi_reference_height,
+                        center_x=tcp_roi_center_x,
+                        center_y=tcp_roi_center_y,
+                        area_fraction=tcp_roi_area_fraction,
+                        x0=tcp_roi_x0,
+                        x1=tcp_roi_x1,
+                        y0=tcp_roi_y0,
+                        y1=tcp_roi_y1,
+                    )
                 elif effective_stain_mode == "reference_episode":
                     if reference_data is None:
                         raise RuntimeError("reference_data is not loaded")
@@ -1891,6 +2035,7 @@ def convert_merged_h5(
                     gzip_level=gzip_level,
                     orig_len=orig_len,
                     truncated=truncated,
+                    mask_metadata=mask_metadata,
                 )
 
                 image_items = [f"{cam}={data[cam].shape}" for cam in camera_names]
@@ -1927,6 +2072,15 @@ def convert_merged_h5(
                     "schema_version": "imitation_form_compact_v1",
                     "include_gripper": bool(include_gripper),
                     "stain_mask_mode": effective_stain_mode,
+                    "tcp_roi_reference_width": int(tcp_roi_reference_width),
+                    "tcp_roi_reference_height": int(tcp_roi_reference_height),
+                    "tcp_roi_center_x": int(tcp_roi_center_x),
+                    "tcp_roi_center_y": int(tcp_roi_center_y),
+                    "tcp_roi_area_fraction": float(tcp_roi_area_fraction),
+                    "tcp_roi_x0": int(tcp_roi_x0),
+                    "tcp_roi_x1": int(tcp_roi_x1),
+                    "tcp_roi_y0": int(tcp_roi_y0),
+                    "tcp_roi_y1": int(tcp_roi_y1),
                     "stain_reference_episode": reference_ep_name,
                     "stain_reference_max_pose_dist": float(stain_reference_max_pose_dist),
                     "stain_reference_top_k": int(stain_reference_top_k),
@@ -2025,10 +2179,11 @@ def build_parser(
         "--stain_mask_mode",
         type=str,
         default="auto",
-        choices=["auto", "copy", "reference_episode", "none"],
+        choices=["auto", "copy", "reference_episode", "tcp_roi", "none"],
         help=(
             "auto uses recorder metadata; reference_episode uses a clean episode as a pose-indexed "
-            "reference bank and regenerates observations/images/stain_mask."
+            "reference bank; tcp_roi writes a persistent fixed TCP interaction ROI to "
+            "observations/images/stain_mask for every episode and frame."
         ),
     )
     parser.add_argument("--stain_reference_episode", type=str, default="ep_0000")
@@ -2037,6 +2192,43 @@ def build_parser(
         action="store_true",
         help="Do not skip the clean reference episode when stain_mask_mode=reference_episode.",
     )
+    parser.add_argument(
+        "--tcp_roi_reference_width",
+        type=int,
+        default=424,
+        help="Reference image width used by TCP ROI coordinates.",
+    )
+    parser.add_argument(
+        "--tcp_roi_reference_height",
+        type=int,
+        default=240,
+        help="Reference image height used by TCP ROI coordinates.",
+    )
+    parser.add_argument(
+        "--tcp_roi_center_x",
+        type=int,
+        default=253,
+        help="TCP center x coordinate at the reference resolution.",
+    )
+    parser.add_argument(
+        "--tcp_roi_center_y",
+        type=int,
+        default=120,
+        help="TCP center y coordinate at the reference resolution.",
+    )
+    parser.add_argument(
+        "--tcp_roi_area_fraction",
+        type=float,
+        default=0.10,
+        help=(
+            "Target full-frame area fraction for a TCP-centered square ROI. "
+            "Set to 0 to use the explicit x/y bounds."
+        ),
+    )
+    parser.add_argument("--tcp_roi_x0", type=int, default=221, help="TCP ROI left bound, inclusive.")
+    parser.add_argument("--tcp_roi_x1", type=int, default=286, help="TCP ROI right bound, exclusive.")
+    parser.add_argument("--tcp_roi_y0", type=int, default=40, help="TCP ROI top bound, inclusive.")
+    parser.add_argument("--tcp_roi_y1", type=int, default=156, help="TCP ROI bottom bound, exclusive.")
     parser.add_argument("--stain_diff_thresh", type=float, default=18.0)
     parser.add_argument("--stain_dark_thresh", type=float, default=165.0)
     parser.add_argument("--reflection_v_thresh", type=float, default=235.0)
@@ -2354,6 +2546,15 @@ def run_cli(
         stain_mask_mode=str(args.stain_mask_mode),
         stain_reference_episode=str(args.stain_reference_episode),
         stain_exclude_reference_episode=not bool(args.keep_stain_reference_episode),
+        tcp_roi_reference_width=int(args.tcp_roi_reference_width),
+        tcp_roi_reference_height=int(args.tcp_roi_reference_height),
+        tcp_roi_center_x=int(args.tcp_roi_center_x),
+        tcp_roi_center_y=int(args.tcp_roi_center_y),
+        tcp_roi_area_fraction=float(args.tcp_roi_area_fraction),
+        tcp_roi_x0=int(args.tcp_roi_x0),
+        tcp_roi_x1=int(args.tcp_roi_x1),
+        tcp_roi_y0=int(args.tcp_roi_y0),
+        tcp_roi_y1=int(args.tcp_roi_y1),
         stain_diff_thresh=float(args.stain_diff_thresh),
         stain_dark_thresh=float(args.stain_dark_thresh),
         reflection_v_thresh=float(args.reflection_v_thresh),

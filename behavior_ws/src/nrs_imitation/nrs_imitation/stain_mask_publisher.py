@@ -83,6 +83,10 @@ class StainMaskPublisher(Node):
         self.declare_parameter("overlay_topic", "/inference_single_cam/stain_mask_overlay")
         self.declare_parameter("publish_overlay", True)
         self.declare_parameter("image_qos", "best_effort")
+        self.declare_parameter("mask_mode", "rgb_threshold")
+        self.declare_parameter("task_roi_center_x", 253)
+        self.declare_parameter("task_roi_y_end", 110)
+        self.declare_parameter("task_roi_half_width", 12)
         self.declare_parameter("stain_dark_thresh", 80)
         self.declare_parameter("reflection_v_thresh", 235)
         self.declare_parameter("reflection_s_thresh", 60)
@@ -95,6 +99,10 @@ class StainMaskPublisher(Node):
         self.mask_topic = str(self.get_parameter("mask_topic").value)
         self.overlay_topic = str(self.get_parameter("overlay_topic").value)
         self.publish_overlay = bool(self.get_parameter("publish_overlay").value)
+        self.mask_mode = str(self.get_parameter("mask_mode").value).strip().lower()
+        self.task_roi_center_x = int(self.get_parameter("task_roi_center_x").value)
+        self.task_roi_y_end = int(self.get_parameter("task_roi_y_end").value)
+        self.task_roi_half_width = int(self.get_parameter("task_roi_half_width").value)
         self.stain_dark_thresh = int(self.get_parameter("stain_dark_thresh").value)
         self.reflection_v_thresh = int(self.get_parameter("reflection_v_thresh").value)
         self.reflection_s_thresh = int(self.get_parameter("reflection_s_thresh").value)
@@ -102,6 +110,12 @@ class StainMaskPublisher(Node):
         self.stain_morph_kernel = int(self.get_parameter("stain_morph_kernel").value)
         self.overlay_alpha = float(self.get_parameter("overlay_alpha").value)
         self.log_every_n = max(1, int(self.get_parameter("log_every_n").value))
+        if self.mask_mode not in ("rgb_threshold", "task_roi"):
+            raise ValueError(
+                f"mask_mode must be rgb_threshold or task_roi, got {self.mask_mode}"
+            )
+        if self.task_roi_half_width < 0:
+            raise ValueError("task_roi_half_width must be non-negative")
 
         img_qos = _image_qos(
             depth=1,
@@ -120,9 +134,30 @@ class StainMaskPublisher(Node):
             "[STAIN-MASK-PUB] "
             f"image_topic={self.image_topic}, mask_topic={self.mask_topic}, "
             f"overlay_topic={self.overlay_topic if self.publish_overlay else '(disabled)'}, "
+            f"mode={self.mask_mode}, "
+            f"task_roi=(center_x={self.task_roi_center_x}, y_end={self.task_roi_y_end}, "
+            f"half_width={self.task_roi_half_width}), "
             f"dark_thresh={self.stain_dark_thresh}, min_area={self.stain_min_area}, "
             f"morph_kernel={self.stain_morph_kernel}"
         )
+
+    def _make_task_roi_mask(self, rgb: np.ndarray) -> np.ndarray:
+        height, width = rgb.shape[:2]
+        # Dataset masks were authored at 424x240. Scale the configured ROI if
+        # the live stream uses another resolution.
+        scale_x = float(width) / 424.0
+        scale_y = float(height) / 240.0
+        center_x = int(round(self.task_roi_center_x * scale_x))
+        half_width = max(0, int(round(self.task_roi_half_width * scale_x)))
+        y_end = int(round(self.task_roi_y_end * scale_y))
+        x0 = max(0, center_x - half_width)
+        x1 = min(width, center_x + half_width + 1)
+        y1 = min(height, max(0, y_end))
+
+        mask = np.zeros((height, width), dtype=np.uint8)
+        if x1 > x0 and y1 > 0:
+            mask[:y1, x0:x1] = 255
+        return mask
 
     def _on_image(self, msg: Image):
         try:
@@ -130,14 +165,17 @@ class StainMaskPublisher(Node):
             if rgb is None:
                 raise RuntimeError(f"unsupported image encoding={msg.encoding}")
 
-            mask = generate_stain_mask_from_rgb(
-                rgb,
-                stain_dark_thresh=self.stain_dark_thresh,
-                reflection_v_thresh=self.reflection_v_thresh,
-                reflection_s_thresh=self.reflection_s_thresh,
-                stain_min_area=self.stain_min_area,
-                stain_morph_kernel=self.stain_morph_kernel,
-            )
+            if self.mask_mode == "task_roi":
+                mask = self._make_task_roi_mask(rgb)
+            else:
+                mask = generate_stain_mask_from_rgb(
+                    rgb,
+                    stain_dark_thresh=self.stain_dark_thresh,
+                    reflection_v_thresh=self.reflection_v_thresh,
+                    reflection_s_thresh=self.reflection_s_thresh,
+                    stain_min_area=self.stain_min_area,
+                    stain_morph_kernel=self.stain_morph_kernel,
+                )
 
             frame_id = msg.header.frame_id or "stain_mask"
             self.pub_mask.publish(_mono8_to_image_msg(mask, stamp=msg.header.stamp, frame_id=frame_id))

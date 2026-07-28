@@ -14,6 +14,9 @@ Output HDF5 layout:
 If the merged HDF5 was recorded with hdf5_recorder_single_cam_stain_mask,
 episode_0 is treated as a clean surface reference by default and is used to
 generate stain_mask for the remaining episodes.
+
+Use --stain_mask_mode tcp_roi to write a persistent fixed TCP interaction ROI
+for every frame, including clean episode_0.
 """
 
 from __future__ import annotations

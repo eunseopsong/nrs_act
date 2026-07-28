@@ -22,12 +22,21 @@ def generate_launch_description():
     auto_stain_mask = LaunchConfiguration("auto_stain_mask")
     stain_mask_overlay_topic = LaunchConfiguration("stain_mask_overlay_topic")
     publish_stain_mask_overlay = LaunchConfiguration("publish_stain_mask_overlay")
+    stain_mask_mode = LaunchConfiguration("stain_mask_mode")
+    task_roi_center_x = LaunchConfiguration("task_roi_center_x")
+    task_roi_y_end = LaunchConfiguration("task_roi_y_end")
+    task_roi_half_width = LaunchConfiguration("task_roi_half_width")
     stain_dark_thresh = LaunchConfiguration("stain_dark_thresh")
     reflection_v_thresh = LaunchConfiguration("reflection_v_thresh")
     reflection_s_thresh = LaunchConfiguration("reflection_s_thresh")
     stain_min_area = LaunchConfiguration("stain_min_area")
     stain_morph_kernel = LaunchConfiguration("stain_morph_kernel")
     cmd_topic = LaunchConfiguration("cmd_topic")
+    camera_preprocess_mode = LaunchConfiguration("camera_preprocess_mode")
+    chunk_size = LaunchConfiguration("chunk_size")
+    use_force_history = LaunchConfiguration("use_force_history")
+    force_history_len = LaunchConfiguration("force_history_len")
+    flow_infer_steps = LaunchConfiguration("flow_infer_steps")
 
     gradcam_enable = LaunchConfiguration("gradcam_enable")
     gradcam_publish = LaunchConfiguration("gradcam_publish")
@@ -54,12 +63,21 @@ def generate_launch_description():
         DeclareLaunchArgument("auto_stain_mask", default_value="false"),
         DeclareLaunchArgument("stain_mask_overlay_topic", default_value="/inference_single_cam/stain_mask_overlay"),
         DeclareLaunchArgument("publish_stain_mask_overlay", default_value="true"),
+        DeclareLaunchArgument("stain_mask_mode", default_value="rgb_threshold"),
+        DeclareLaunchArgument("task_roi_center_x", default_value="253"),
+        DeclareLaunchArgument("task_roi_y_end", default_value="110"),
+        DeclareLaunchArgument("task_roi_half_width", default_value="12"),
         DeclareLaunchArgument("stain_dark_thresh", default_value="80"),
         DeclareLaunchArgument("reflection_v_thresh", default_value="235"),
         DeclareLaunchArgument("reflection_s_thresh", default_value="60"),
         DeclareLaunchArgument("stain_min_area", default_value="20"),
         DeclareLaunchArgument("stain_morph_kernel", default_value="3"),
         DeclareLaunchArgument("cmd_topic", default_value="/ur10skku/cmdMotion"),
+        DeclareLaunchArgument("camera_preprocess_mode", default_value="stabilize"),
+        DeclareLaunchArgument("chunk_size", default_value="200"),
+        DeclareLaunchArgument("use_force_history", default_value="true"),
+        DeclareLaunchArgument("force_history_len", default_value="10"),
+        DeclareLaunchArgument("flow_infer_steps", default_value="10"),
 
         DeclareLaunchArgument("gradcam_enable", default_value="true"),
         DeclareLaunchArgument("gradcam_publish", default_value="true"),
@@ -83,6 +101,10 @@ def generate_launch_description():
                 "mask_topic": stain_mask_topic,
                 "overlay_topic": stain_mask_overlay_topic,
                 "publish_overlay": ParameterValue(publish_stain_mask_overlay, value_type=bool),
+                "mask_mode": stain_mask_mode,
+                "task_roi_center_x": ParameterValue(task_roi_center_x, value_type=int),
+                "task_roi_y_end": ParameterValue(task_roi_y_end, value_type=int),
+                "task_roi_half_width": ParameterValue(task_roi_half_width, value_type=int),
                 "stain_dark_thresh": ParameterValue(stain_dark_thresh, value_type=int),
                 "reflection_v_thresh": ParameterValue(reflection_v_thresh, value_type=int),
                 "reflection_s_thresh": ParameterValue(reflection_s_thresh, value_type=int),
@@ -105,6 +127,13 @@ def generate_launch_description():
                 "pose_topic": pose_topic,
                 "force_topic": force_topic,
                 "image_topic": image_topic,
+                # ROS/YAML interprets the unquoted token "off" as Boolean False.
+                # Force a string so camera_preprocess_mode:=off reaches the node as intended.
+                "camera_preprocess_mode": ParameterValue(camera_preprocess_mode, value_type=str),
+                "chunk_size": ParameterValue(chunk_size, value_type=int),
+                "use_force_history": ParameterValue(use_force_history, value_type=bool),
+                "force_history_len": ParameterValue(force_history_len, value_type=int),
+                "flow_infer_steps": ParameterValue(flow_infer_steps, value_type=int),
                 "use_stain_mask": ParameterValue(use_stain_mask, value_type=bool),
                 "stain_mask_topic": stain_mask_topic,
                 "cmd_topic": cmd_topic,
