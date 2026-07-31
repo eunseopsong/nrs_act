@@ -87,6 +87,11 @@ class StainMaskPublisher(Node):
         self.declare_parameter("task_roi_center_x", 253)
         self.declare_parameter("task_roi_y_end", 110)
         self.declare_parameter("task_roi_half_width", 12)
+        self.declare_parameter("tcp_roi_reference_width", 424)
+        self.declare_parameter("tcp_roi_reference_height", 240)
+        self.declare_parameter("tcp_roi_center_x", 253)
+        self.declare_parameter("tcp_roi_center_y", 120)
+        self.declare_parameter("tcp_roi_area_fraction", 0.10)
         self.declare_parameter("stain_dark_thresh", 80)
         self.declare_parameter("reflection_v_thresh", 235)
         self.declare_parameter("reflection_s_thresh", 60)
@@ -103,6 +108,11 @@ class StainMaskPublisher(Node):
         self.task_roi_center_x = int(self.get_parameter("task_roi_center_x").value)
         self.task_roi_y_end = int(self.get_parameter("task_roi_y_end").value)
         self.task_roi_half_width = int(self.get_parameter("task_roi_half_width").value)
+        self.tcp_roi_reference_width = int(self.get_parameter("tcp_roi_reference_width").value)
+        self.tcp_roi_reference_height = int(self.get_parameter("tcp_roi_reference_height").value)
+        self.tcp_roi_center_x = int(self.get_parameter("tcp_roi_center_x").value)
+        self.tcp_roi_center_y = int(self.get_parameter("tcp_roi_center_y").value)
+        self.tcp_roi_area_fraction = float(self.get_parameter("tcp_roi_area_fraction").value)
         self.stain_dark_thresh = int(self.get_parameter("stain_dark_thresh").value)
         self.reflection_v_thresh = int(self.get_parameter("reflection_v_thresh").value)
         self.reflection_s_thresh = int(self.get_parameter("reflection_s_thresh").value)
@@ -110,12 +120,16 @@ class StainMaskPublisher(Node):
         self.stain_morph_kernel = int(self.get_parameter("stain_morph_kernel").value)
         self.overlay_alpha = float(self.get_parameter("overlay_alpha").value)
         self.log_every_n = max(1, int(self.get_parameter("log_every_n").value))
-        if self.mask_mode not in ("rgb_threshold", "task_roi"):
+        if self.mask_mode not in ("rgb_threshold", "task_roi", "tcp_roi"):
             raise ValueError(
-                f"mask_mode must be rgb_threshold or task_roi, got {self.mask_mode}"
+                f"mask_mode must be rgb_threshold, task_roi, or tcp_roi, got {self.mask_mode}"
             )
         if self.task_roi_half_width < 0:
             raise ValueError("task_roi_half_width must be non-negative")
+        if self.tcp_roi_reference_width <= 0 or self.tcp_roi_reference_height <= 0:
+            raise ValueError("tcp_roi reference resolution must be positive")
+        if not 0.0 < self.tcp_roi_area_fraction <= 1.0:
+            raise ValueError("tcp_roi_area_fraction must be in (0, 1]")
 
         img_qos = _image_qos(
             depth=1,
@@ -137,6 +151,9 @@ class StainMaskPublisher(Node):
             f"mode={self.mask_mode}, "
             f"task_roi=(center_x={self.task_roi_center_x}, y_end={self.task_roi_y_end}, "
             f"half_width={self.task_roi_half_width}), "
+            f"tcp_roi=(ref={self.tcp_roi_reference_width}x{self.tcp_roi_reference_height}, "
+            f"center=({self.tcp_roi_center_x},{self.tcp_roi_center_y}), "
+            f"area_fraction={self.tcp_roi_area_fraction:.6f}), "
             f"dark_thresh={self.stain_dark_thresh}, min_area={self.stain_min_area}, "
             f"morph_kernel={self.stain_morph_kernel}"
         )
@@ -159,6 +176,27 @@ class StainMaskPublisher(Node):
             mask[:y1, x0:x1] = 255
         return mask
 
+    def _make_tcp_roi_mask(self, rgb: np.ndarray) -> np.ndarray:
+        height, width = rgb.shape[:2]
+        scale_x = float(width) / float(self.tcp_roi_reference_width)
+        scale_y = float(height) / float(self.tcp_roi_reference_height)
+        center_x = int(round(self.tcp_roi_center_x * scale_x))
+        center_y = int(round(self.tcp_roi_center_y * scale_y))
+
+        side = max(
+            1,
+            int(round(np.sqrt(self.tcp_roi_area_fraction * float(width * height)))),
+        )
+        side = min(side, width, height)
+        x0 = min(max(0, center_x - side // 2), width - side)
+        y0 = min(max(0, center_y - side // 2), height - side)
+        x1 = x0 + side
+        y1 = y0 + side
+
+        mask = np.zeros((height, width), dtype=np.uint8)
+        mask[y0:y1, x0:x1] = 255
+        return mask
+
     def _on_image(self, msg: Image):
         try:
             rgb = image_to_rgb_numpy(msg)
@@ -167,6 +205,8 @@ class StainMaskPublisher(Node):
 
             if self.mask_mode == "task_roi":
                 mask = self._make_task_roi_mask(rgb)
+            elif self.mask_mode == "tcp_roi":
+                mask = self._make_tcp_roi_mask(rgb)
             else:
                 mask = generate_stain_mask_from_rgb(
                     rgb,

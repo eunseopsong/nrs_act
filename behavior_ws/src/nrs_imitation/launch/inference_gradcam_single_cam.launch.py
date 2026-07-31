@@ -26,6 +26,11 @@ def generate_launch_description():
     task_roi_center_x = LaunchConfiguration("task_roi_center_x")
     task_roi_y_end = LaunchConfiguration("task_roi_y_end")
     task_roi_half_width = LaunchConfiguration("task_roi_half_width")
+    tcp_roi_reference_width = LaunchConfiguration("tcp_roi_reference_width")
+    tcp_roi_reference_height = LaunchConfiguration("tcp_roi_reference_height")
+    tcp_roi_center_x = LaunchConfiguration("tcp_roi_center_x")
+    tcp_roi_center_y = LaunchConfiguration("tcp_roi_center_y")
+    tcp_roi_area_fraction = LaunchConfiguration("tcp_roi_area_fraction")
     stain_dark_thresh = LaunchConfiguration("stain_dark_thresh")
     reflection_v_thresh = LaunchConfiguration("reflection_v_thresh")
     reflection_s_thresh = LaunchConfiguration("reflection_s_thresh")
@@ -67,6 +72,11 @@ def generate_launch_description():
         DeclareLaunchArgument("task_roi_center_x", default_value="253"),
         DeclareLaunchArgument("task_roi_y_end", default_value="110"),
         DeclareLaunchArgument("task_roi_half_width", default_value="12"),
+        DeclareLaunchArgument("tcp_roi_reference_width", default_value="424"),
+        DeclareLaunchArgument("tcp_roi_reference_height", default_value="240"),
+        DeclareLaunchArgument("tcp_roi_center_x", default_value="253"),
+        DeclareLaunchArgument("tcp_roi_center_y", default_value="120"),
+        DeclareLaunchArgument("tcp_roi_area_fraction", default_value="0.10"),
         DeclareLaunchArgument("stain_dark_thresh", default_value="80"),
         DeclareLaunchArgument("reflection_v_thresh", default_value="235"),
         DeclareLaunchArgument("reflection_s_thresh", default_value="60"),
@@ -105,6 +115,11 @@ def generate_launch_description():
                 "task_roi_center_x": ParameterValue(task_roi_center_x, value_type=int),
                 "task_roi_y_end": ParameterValue(task_roi_y_end, value_type=int),
                 "task_roi_half_width": ParameterValue(task_roi_half_width, value_type=int),
+                "tcp_roi_reference_width": ParameterValue(tcp_roi_reference_width, value_type=int),
+                "tcp_roi_reference_height": ParameterValue(tcp_roi_reference_height, value_type=int),
+                "tcp_roi_center_x": ParameterValue(tcp_roi_center_x, value_type=int),
+                "tcp_roi_center_y": ParameterValue(tcp_roi_center_y, value_type=int),
+                "tcp_roi_area_fraction": ParameterValue(tcp_roi_area_fraction, value_type=float),
                 "stain_dark_thresh": ParameterValue(stain_dark_thresh, value_type=int),
                 "reflection_v_thresh": ParameterValue(reflection_v_thresh, value_type=int),
                 "reflection_s_thresh": ParameterValue(reflection_s_thresh, value_type=int),

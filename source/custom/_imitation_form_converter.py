@@ -1726,6 +1726,27 @@ def _resolve_reference_episode_name(ep_names: Sequence[str], requested: str) -> 
     raise KeyError(f"Reference episode {requested!r} not found. Available: {list(ep_names)[:8]}...")
 
 
+def _parse_episode_indices(value: str) -> List[int]:
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    indices: List[int] = []
+    for token in raw.split(","):
+        item = token.strip()
+        if not item:
+            continue
+        try:
+            index = int(item)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"episode indices must be comma-separated integers, got {item!r}"
+            ) from exc
+        if index < 0:
+            raise argparse.ArgumentTypeError(f"episode index must be non-negative, got {index}")
+        indices.append(index)
+    return sorted(set(indices))
+
+
 def convert_merged_h5(
     input_h5: Path,
     output_dir: Path,
@@ -1737,6 +1758,7 @@ def convert_merged_h5(
     overwrite: bool,
     write_summary: bool,
     include_gripper: bool = False,
+    exclude_episode_indices: Sequence[int] = (),
     stain_mask_mode: str = "auto",
     stain_reference_episode: str = "ep_0000",
     stain_exclude_reference_episode: bool = True,
@@ -1820,6 +1842,7 @@ def convert_merged_h5(
 
     written: List[Path] = []
     failed: List[Tuple[str, str]] = []
+    skipped: List[Tuple[int, str]] = []
 
     with h5py.File(str(input_h5), "r") as f:
         if "episodes" not in f:
@@ -1828,6 +1851,13 @@ def convert_merged_h5(
         ep_names = sorted(name for name in f["episodes"].keys() if not str(name).endswith("__writing"))
         if not ep_names:
             raise RuntimeError(f"No episodes found under {input_h5}/episodes")
+        excluded_indices = sorted(set(int(i) for i in exclude_episode_indices))
+        invalid_indices = [i for i in excluded_indices if i < 0 or i >= len(ep_names)]
+        if invalid_indices:
+            raise ValueError(
+                f"exclude_episode_indices out of range for {len(ep_names)} episodes: {invalid_indices}"
+            )
+        excluded_set = set(excluded_indices)
 
         effective_stain_mode = _resolve_stain_mask_mode(f, stain_mask_mode)
         mask_metadata: Optional[Dict[str, object]] = None
@@ -1871,6 +1901,7 @@ def convert_merged_h5(
         print(f"[INFO] camera_names   = {camera_names}")
         print(f"[INFO] include_gripper= {int(bool(include_gripper))}")
         print(f"[INFO] episodes found = {len(ep_names)}")
+        print(f"[INFO] excluded idx   = {excluded_indices}")
         print(f"[INFO] stain_mode     = {effective_stain_mode}")
         if effective_stain_mode == "tcp_roi":
             if float(tcp_roi_area_fraction) > 0.0:
@@ -1891,8 +1922,12 @@ def convert_merged_h5(
             print(f"[INFO] stain_ref_ep   = {reference_ep_name} (exclude={int(bool(stain_exclude_reference_episode))})")
 
         out_idx = 0
-        for ep_name in ep_names:
+        for ep_index, ep_name in enumerate(ep_names):
             try:
+                if ep_index in excluded_set:
+                    skipped.append((ep_index, ep_name))
+                    print(f"[SKIP] source index {ep_index} ({ep_name}): explicitly excluded")
+                    continue
                 if (
                     effective_stain_mode == "reference_episode"
                     and bool(stain_exclude_reference_episode)
@@ -2069,6 +2104,11 @@ def convert_merged_h5(
                     "written": [str(p) for p in written],
                     "num_failed": len(failed),
                     "failed": [{"episode": ep, "error": err} for ep, err in failed],
+                    "num_excluded": len(skipped),
+                    "excluded": [
+                        {"source_index": index, "source_episode": ep}
+                        for index, ep in skipped
+                    ],
                     "schema_version": "imitation_form_compact_v1",
                     "include_gripper": bool(include_gripper),
                     "stain_mask_mode": effective_stain_mode,
@@ -2124,7 +2164,10 @@ def convert_merged_h5(
             )
         print(f"[INFO] wrote summary: {summary_path}")
 
-    print(f"[DONE] converted episodes: {len(written)} / {len(written) + len(failed)}")
+    print(
+        f"[DONE] written={len(written)}, excluded={len(skipped)}, failed={len(failed)}, "
+        f"source_total={len(written) + len(skipped) + len(failed)}"
+    )
     if not written:
         raise RuntimeError("No episodes were converted successfully.")
     return written
@@ -2162,6 +2205,15 @@ def build_parser(
     parser.add_argument("--gzip_level", type=int, default=4)
     parser.add_argument("--overwrite", action="store_true", help="Replace output_dir if it contains old episodes.")
     parser.add_argument("--write_summary", action="store_true", help="Write conversion_summary.json into output_dir.")
+    parser.add_argument(
+        "--exclude_episode_indices",
+        type=_parse_episode_indices,
+        default=[],
+        help=(
+            "Comma-separated zero-based source episode indices to exclude, for example 27,32. "
+            "Remaining episodes are renumbered contiguously in the output directory."
+        ),
+    )
     parser.add_argument(
         "--include_gripper",
         dest="include_gripper",
@@ -2543,6 +2595,7 @@ def run_cli(
         overwrite=bool(args.overwrite),
         write_summary=bool(args.write_summary),
         include_gripper=bool(args.include_gripper),
+        exclude_episode_indices=args.exclude_episode_indices,
         stain_mask_mode=str(args.stain_mask_mode),
         stain_reference_episode=str(args.stain_reference_episode),
         stain_exclude_reference_episode=not bool(args.keep_stain_reference_episode),
