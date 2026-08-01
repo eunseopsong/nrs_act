@@ -97,6 +97,11 @@ nrs_forcecon@192.168.0.151:/home/nrs_forcecon/dev_ws/src/y2_ur10skku_control/Y2F
 `[GRAVITY_REJECTED]`가 나오면 기존 gravity YAML은 유지된다. 대표적인 거부 조건은 자세 방향 rank 부족,
 condition number 초과, 비현실적인 질량/CoM, force/torque residual RMS 초과다.
 
+기본 설정에서는 32개 gravity pose를 모두 최종 fit에 쓰지 않는다. 먼저 전체 pose로 1차 fit을 수행해
+pose별 force/torque residual을 계산하고, residual이 작은 good-quality pose만 골라 다시 fit한다.
+`gravity_quality_min_pose_samples`개 이상이 남고 최종 RMS/condition/mass/CoM 검사를 통과할 때만
+`spindle_gravity.yaml`을 저장한다.
+
 생성되는 YAML 행렬:
 
 - `T_AD`: Vive world/raw frame을 robot base frame으로 올리는 base calibration
@@ -136,6 +141,11 @@ capture_min_clean_samples = 20
 vr_capture_age_s = 0.2
 max_capture_sync_dt_s = 0.05
 capture_max_vr_std_mm = 10.0
+gravity_quality_select_enable = true
+gravity_quality_min_pose_samples = 16
+gravity_quality_max_pose_samples = 24    # 0 또는 음수면 good-quality pose 전체 사용
+gravity_quality_force_residual_max_n = 3.0
+gravity_quality_torque_residual_max_nm = 0.35
 handeye_outlier_reject_enable = true
 handeye_outlier_max_reject = 2
 handeye_outlier_abs_mm = 15.0
