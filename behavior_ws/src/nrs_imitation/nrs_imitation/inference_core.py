@@ -3781,6 +3781,11 @@ class NodeCmdMotionInfer(Node):
             return self.prev_cmd.copy() if self.prev_cmd is not None else np.zeros(9, dtype=np.float32)
 
         cmd = cmd[:9].astype(np.float32).copy()
+        # Final publication boundary: when tangential force commands are
+        # disabled, no upstream plan/stage path can leak measured-friction
+        # targets into the robot command.
+        if not self.force_xy_cmd_enable:
+            cmd[6:8] = 0.0
         published = cmd
 
         if self.cmd_safety_enable:

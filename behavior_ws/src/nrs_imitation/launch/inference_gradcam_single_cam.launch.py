@@ -46,6 +46,7 @@ def generate_launch_description():
     flow_noise_seed = LaunchConfiguration("flow_noise_seed")
     action_selection_mode = LaunchConfiguration("action_selection_mode")
     trajectory_hz = LaunchConfiguration("trajectory_hz")
+    force_xy_cmd_enable = LaunchConfiguration("force_xy_cmd_enable")
     cmd_safety_enable = LaunchConfiguration("cmd_safety_enable")
     cmd_safety_max_xyz_from_current_mm = LaunchConfiguration("cmd_safety_max_xyz_from_current_mm")
     cmd_safety_max_xy_from_start_mm = LaunchConfiguration("cmd_safety_max_xy_from_start_mm")
@@ -110,6 +111,7 @@ def generate_launch_description():
         DeclareLaunchArgument("flow_noise_seed", default_value="0"),
         DeclareLaunchArgument("action_selection_mode", default_value="trajectory_interp"),
         DeclareLaunchArgument("trajectory_hz", default_value="30.0"),
+        DeclareLaunchArgument("force_xy_cmd_enable", default_value="false"),
 
         # filtered58 demo envelope maxima were approximately XY=134.9 mm,
         # Z-down=79.3 mm, Z-up=86.1 mm. These defaults retain a small margin.
@@ -195,6 +197,7 @@ def generate_launch_description():
                 "flow_noise_seed": ParameterValue(flow_noise_seed, value_type=int),
                 "action_selection_mode": action_selection_mode,
                 "trajectory_hz": ParameterValue(trajectory_hz, value_type=float),
+                "force_xy_cmd_enable": ParameterValue(force_xy_cmd_enable, value_type=bool),
                 "cmd_safety_enable": ParameterValue(cmd_safety_enable, value_type=bool),
                 "cmd_safety_max_xyz_from_current_mm": ParameterValue(
                     cmd_safety_max_xyz_from_current_mm, value_type=float

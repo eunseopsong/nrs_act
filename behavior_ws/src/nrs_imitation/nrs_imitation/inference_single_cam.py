@@ -28,6 +28,9 @@ DEFAULT_ROS_ARGS = [
     "-p", "step_cap_pos_mm:=0.05",
     "-p", "step_cap_ang_rad:=0.0001",
     "-p", "step_cap_fz:=0.05",
+    # The demonstrations treat tangential Fx/Fy as measured friction, not as
+    # commanded targets. Preserve them in observations but never send them.
+    "-p", "force_xy_cmd_enable:=false",
     # Disable the Fz command upper clamp for single-camera policies. The
     # non-negative guard and per-control-step slew cap remain active.
     "-p", "fz_hard_limit:=0.0",

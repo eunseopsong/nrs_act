@@ -1607,6 +1607,7 @@ def write_episode(
     gzip_level: int,
     orig_len: int,
     truncated: bool,
+    zero_action_force_xy: bool = False,
     mask_metadata: Optional[Dict[str, object]] = None,
 ) -> None:
     if out_path.exists():
@@ -1624,13 +1625,20 @@ def write_episode(
         f.attrs["has_gripper"] = int(bool(has_gripper))
         f.attrs["qpos_dim"] = 9
         f.attrs["action_dim"] = 11 if has_gripper else 9
+        f.attrs["action_force_xy_zeroed"] = int(bool(zero_action_force_xy))
+        f.attrs["observation_force_xy_preserved"] = 1
         if mask_metadata:
             for key, value in mask_metadata.items():
                 f.attrs[f"mask_{key}"] = value
 
         g_action = f.create_group("action")
         g_action.create_dataset("position", data=data["position"].astype(np.float32), **kwargs)
-        g_action.create_dataset("force", data=data["force"].astype(np.float32), **kwargs)
+        action_force = data["force"].astype(np.float32).copy()
+        if zero_action_force_xy:
+            action_force[:, :2] = 0.0
+        action_force_ds = g_action.create_dataset("force", data=action_force, **kwargs)
+        action_force_ds.attrs["xy_zeroed"] = int(bool(zero_action_force_xy))
+        action_force_ds.attrs["semantics"] = "command_target_force"
         if has_gripper:
             g_action.create_dataset(
                 "gripper_present_position",
@@ -1650,7 +1658,11 @@ def write_episode(
 
         g_obs = f.create_group("observations", track_order=True)
         g_obs.create_dataset("position", data=data["position"].astype(np.float32), **kwargs)
-        g_obs.create_dataset("force", data=data["force"].astype(np.float32), **kwargs)
+        observation_force_ds = g_obs.create_dataset(
+            "force", data=data["force"].astype(np.float32), **kwargs
+        )
+        observation_force_ds.attrs["xy_preserved"] = 1
+        observation_force_ds.attrs["semantics"] = "measured_force_observation"
         if has_gripper:
             g_gripper = g_obs.create_group("gripper", track_order=True)
             g_gripper.create_dataset(
@@ -1759,6 +1771,7 @@ def convert_merged_h5(
     write_summary: bool,
     include_gripper: bool = False,
     exclude_episode_indices: Sequence[int] = (),
+    zero_action_force_xy: bool = False,
     stain_mask_mode: str = "auto",
     stain_reference_episode: str = "ep_0000",
     stain_exclude_reference_episode: bool = True,
@@ -1900,6 +1913,7 @@ def convert_merged_h5(
         print(f"[INFO] output_dir     = {output_dir}")
         print(f"[INFO] camera_names   = {camera_names}")
         print(f"[INFO] include_gripper= {int(bool(include_gripper))}")
+        print(f"[INFO] action_fxy_zero= {int(bool(zero_action_force_xy))}")
         print(f"[INFO] episodes found = {len(ep_names)}")
         print(f"[INFO] excluded idx   = {excluded_indices}")
         print(f"[INFO] stain_mode     = {effective_stain_mode}")
@@ -2070,6 +2084,7 @@ def convert_merged_h5(
                     gzip_level=gzip_level,
                     orig_len=orig_len,
                     truncated=truncated,
+                    zero_action_force_xy=zero_action_force_xy,
                     mask_metadata=mask_metadata,
                 )
 
@@ -2111,6 +2126,8 @@ def convert_merged_h5(
                     ],
                     "schema_version": "imitation_form_compact_v1",
                     "include_gripper": bool(include_gripper),
+                    "action_force_xy_zeroed": bool(zero_action_force_xy),
+                    "observation_force_xy_preserved": True,
                     "stain_mask_mode": effective_stain_mode,
                     "tcp_roi_reference_width": int(tcp_roi_reference_width),
                     "tcp_roi_reference_height": int(tcp_roi_reference_height),
@@ -2213,6 +2230,22 @@ def build_parser(
             "Comma-separated zero-based source episode indices to exclude, for example 27,32. "
             "Remaining episodes are renumbered contiguously in the output directory."
         ),
+    )
+    parser.add_argument(
+        "--zero_action_force_xy",
+        dest="zero_action_force_xy",
+        action="store_true",
+        default=False,
+        help=(
+            "Write action/force Fx,Fy as zero while preserving measured Fx,Fy in "
+            "observations/force for policy conditioning."
+        ),
+    )
+    parser.add_argument(
+        "--keep_action_force_xy",
+        dest="zero_action_force_xy",
+        action="store_false",
+        help="Keep measured Fx,Fy in both action/force and observations/force (legacy behavior).",
     )
     parser.add_argument(
         "--include_gripper",
@@ -2596,6 +2629,7 @@ def run_cli(
         write_summary=bool(args.write_summary),
         include_gripper=bool(args.include_gripper),
         exclude_episode_indices=args.exclude_episode_indices,
+        zero_action_force_xy=bool(args.zero_action_force_xy),
         stain_mask_mode=str(args.stain_mask_mode),
         stain_reference_episode=str(args.stain_reference_episode),
         stain_exclude_reference_episode=not bool(args.keep_stain_reference_episode),
