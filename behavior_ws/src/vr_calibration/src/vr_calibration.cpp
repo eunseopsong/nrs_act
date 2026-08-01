@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <ctime>   // for timestamp
 #include <limits>
+#include <numeric>
 
 // ================= Constants =================
 static constexpr double kPi = 3.14159265358979323846;
@@ -313,6 +314,11 @@ public:
     this->declare_parameter<double>("gravity_max_condition_number", 30.0);
     this->declare_parameter<double>("gravity_max_force_rms_n", 2.0);
     this->declare_parameter<double>("gravity_max_torque_rms_nm", 0.35);
+    this->declare_parameter<bool>("gravity_quality_select_enable", true);
+    this->declare_parameter<int>("gravity_quality_min_pose_samples", 16);
+    this->declare_parameter<int>("gravity_quality_max_pose_samples", 24); // <=0: use all good poses
+    this->declare_parameter<double>("gravity_quality_force_residual_max_n", 3.0);
+    this->declare_parameter<double>("gravity_quality_torque_residual_max_nm", 0.35);
     this->declare_parameter<double>("gravity_min_mass_kg", 0.05);
     this->declare_parameter<double>("gravity_max_mass_kg", 15.0);
     this->declare_parameter<double>("gravity_max_com_norm_m", 0.50);
@@ -388,6 +394,20 @@ public:
       std::max(0.0, this->get_parameter("gravity_max_force_rms_n").as_double());
     gravity_max_torque_rms_nm_ =
       std::max(0.0, this->get_parameter("gravity_max_torque_rms_nm").as_double());
+    gravity_quality_select_enable_ =
+      this->get_parameter("gravity_quality_select_enable").as_bool();
+    gravity_quality_min_pose_samples_ = static_cast<size_t>(std::max<int64_t>(
+      6, this->get_parameter("gravity_quality_min_pose_samples").as_int()));
+    const int64_t gravity_quality_max_pose_samples_param =
+      this->get_parameter("gravity_quality_max_pose_samples").as_int();
+    gravity_quality_use_all_good_ = (gravity_quality_max_pose_samples_param <= 0);
+    gravity_quality_max_pose_samples_ = gravity_quality_use_all_good_
+      ? 0
+      : static_cast<size_t>(std::max<int64_t>(6, gravity_quality_max_pose_samples_param));
+    gravity_quality_force_residual_max_n_ =
+      std::max(0.0, this->get_parameter("gravity_quality_force_residual_max_n").as_double());
+    gravity_quality_torque_residual_max_nm_ =
+      std::max(0.0, this->get_parameter("gravity_quality_torque_residual_max_nm").as_double());
     gravity_min_mass_kg_ =
       std::max(0.0, this->get_parameter("gravity_min_mass_kg").as_double());
     gravity_max_mass_kg_ =
@@ -458,6 +478,15 @@ public:
       gravity_raw_tcp_topic_.c_str(), gravity_yaml_path_.c_str(),
       gravity_min_pose_samples_,
       gravity_remote_deploy_enable_ ? gravity_remote_host_.c_str() : "disabled");
+    const std::string gravity_quality_max_good_log =
+      gravity_quality_use_all_good_ ? "all" : std::to_string(gravity_quality_max_pose_samples_);
+    RCLCPP_INFO(get_logger(),
+      "[GRAVITY_QUALITY] enable=%s min_good=%zu max_good=%s pose_res<=%.2fN/%.3fNm",
+      gravity_quality_select_enable_ ? "true" : "false",
+      gravityQualityMinPoseSamples(),
+      gravity_quality_max_good_log.c_str(),
+      gravity_quality_force_residual_max_n_,
+      gravity_quality_torque_residual_max_nm_);
 
     RCLCPP_INFO(get_logger(),
       "[T_SA] mode=%s max=%.1fdeg",
@@ -753,6 +782,12 @@ private:
   double gravity_max_condition_number_{30.0};
   double gravity_max_force_rms_n_{2.0};
   double gravity_max_torque_rms_nm_{0.35};
+  bool gravity_quality_select_enable_{true};
+  size_t gravity_quality_min_pose_samples_{16};
+  size_t gravity_quality_max_pose_samples_{24};
+  bool gravity_quality_use_all_good_{false};
+  double gravity_quality_force_residual_max_n_{3.0};
+  double gravity_quality_torque_residual_max_nm_{0.35};
   double gravity_min_mass_kg_{0.05};
   double gravity_max_mass_kg_{15.0};
   double gravity_max_com_norm_m_{0.50};
@@ -893,6 +928,29 @@ private:
     Eigen::Matrix<double,6,1> wrench_tcp = Eigen::Matrix<double,6,1>::Zero();
     size_t waypoint_index{0};
     size_t window_samples{0};
+  };
+
+  struct GravityFitResult
+  {
+    std::vector<size_t> indices;
+    Eigen::Matrix<double,6,3> H = Eigen::Matrix<double,6,3>::Zero();
+    Eigen::Matrix<double,6,3> h_full = Eigen::Matrix<double,6,3>::Zero();
+    Eigen::Matrix<double,1,6> bias = Eigen::Matrix<double,1,6>::Zero();
+    Eigen::Vector3d com_tcp_m = Eigen::Vector3d::Zero();
+    std::vector<double> force_residual_n;
+    std::vector<double> torque_residual_nm;
+    double condition_number{std::numeric_limits<double>::infinity()};
+    double mass_kg{std::numeric_limits<double>::quiet_NaN()};
+    double force_rms_n{std::numeric_limits<double>::quiet_NaN()};
+    double torque_rms_nm{std::numeric_limits<double>::quiet_NaN()};
+  };
+
+  struct GravityQualityCandidate
+  {
+    size_t sample_index{0};
+    double force_residual_n{0.0};
+    double torque_residual_nm{0.0};
+    double score{0.0};
   };
   std::vector<GravityPoseSample> gravity_pose_samples_;
 
@@ -2394,22 +2452,64 @@ private:
     return true;
   }
 
-  void finalizeGravityCalibration()
+  size_t gravityQualityMinPoseSamples() const
   {
-    if (!gravity_calibration_enable_) return;
-    const size_t N = gravity_pose_samples_.size();
-    if (N < gravity_min_pose_samples_) {
-      throw std::runtime_error(
-        "Spindle gravity fit rejected: only " + std::to_string(N) +
-        " pose samples; need " + std::to_string(gravity_min_pose_samples_) + ".");
+    if (!gravity_quality_select_enable_) return gravity_min_pose_samples_;
+    return std::max(gravity_min_pose_samples_, gravity_quality_min_pose_samples_);
+  }
+
+  double gravityQualityScore(double force_residual_n, double torque_residual_nm) const
+  {
+    const double force_den =
+      (gravity_quality_force_residual_max_n_ > 0.0)
+        ? gravity_quality_force_residual_max_n_
+        : std::max(1e-9, gravity_max_force_rms_n_);
+    const double torque_den =
+      (gravity_quality_torque_residual_max_nm_ > 0.0)
+        ? gravity_quality_torque_residual_max_nm_
+        : std::max(1e-9, gravity_max_torque_rms_nm_);
+    return std::hypot(force_residual_n / force_den, torque_residual_nm / torque_den);
+  }
+
+  std::string formatGravityWpList(const std::vector<size_t>& sample_indices) const
+  {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < sample_indices.size(); ++i) {
+      if (i > 0) oss << ",";
+      const size_t sample_idx = sample_indices[i];
+      if (sample_idx < gravity_pose_samples_.size()) {
+        oss << (gravity_pose_samples_[sample_idx].waypoint_index + 1);
+      } else {
+        oss << "?";
+      }
+    }
+    oss << "]";
+    return oss.str();
+  }
+
+  bool fitGravitySubset(const std::vector<size_t>& indices,
+                        GravityFitResult& out,
+                        std::string& reject_reason) const
+  {
+    const size_t N = indices.size();
+    if (N < 6) {
+      reject_reason = "Spindle gravity fit rejected: fewer than 6 pose samples.";
+      return false;
     }
 
     Eigen::MatrixXd G(static_cast<Eigen::Index>(N), 3);
     Eigen::MatrixXd W(static_cast<Eigen::Index>(N), 6);
-    for (size_t i = 0; i < N; ++i) {
-      G.row(static_cast<Eigen::Index>(i)) = gravity_pose_samples_[i].gravity_tcp.transpose();
-      W.row(static_cast<Eigen::Index>(i)) = gravity_pose_samples_[i].wrench_tcp.transpose();
+    for (size_t row = 0; row < N; ++row) {
+      const size_t sample_idx = indices[row];
+      if (sample_idx >= gravity_pose_samples_.size()) {
+        reject_reason = "Spindle gravity fit rejected: internal sample index out of range.";
+        return false;
+      }
+      G.row(static_cast<Eigen::Index>(row)) = gravity_pose_samples_[sample_idx].gravity_tcp.transpose();
+      W.row(static_cast<Eigen::Index>(row)) = gravity_pose_samples_[sample_idx].wrench_tcp.transpose();
     }
+
     const Eigen::RowVector3d g_mean = G.colwise().mean();
     const Eigen::Matrix<double,1,6> w_mean = W.colwise().mean();
     const Eigen::MatrixXd Gc = G.rowwise() - g_mean;
@@ -2418,14 +2518,17 @@ private:
     Eigen::JacobiSVD<Eigen::MatrixXd> g_svd(Gc, Eigen::ComputeThinU | Eigen::ComputeThinV);
     const Eigen::VectorXd sv = g_svd.singularValues();
     if (sv.size() < 3 || sv(2) <= 1e-8) {
-      throw std::runtime_error("Spindle gravity fit rejected: gravity directions are rank deficient.");
+      reject_reason = "Spindle gravity fit rejected: gravity directions are rank deficient.";
+      return false;
     }
+
     const double condition_number = sv(0) / sv(2);
     if (!std::isfinite(condition_number) || condition_number > gravity_max_condition_number_) {
       std::ostringstream oss;
       oss << "Spindle gravity fit rejected: condition number " << condition_number
           << " exceeds " << gravity_max_condition_number_ << ".";
-      throw std::runtime_error(oss.str());
+      reject_reason = oss.str();
+      return false;
     }
 
     const Eigen::Matrix<double,3,6> x_full = Gc.colPivHouseholderQr().solve(Wc);
@@ -2433,13 +2536,18 @@ private:
 
     const Eigen::MatrixXd Fc = Wc.leftCols(3);
     const double g_energy = Gc.squaredNorm();
+    if (g_energy <= 1e-12) {
+      reject_reason = "Spindle gravity fit rejected: gravity direction energy is too small.";
+      return false;
+    }
     const double mass_kg = (Gc.array() * Fc.array()).sum() / g_energy;
     if (!std::isfinite(mass_kg) || mass_kg < gravity_min_mass_kg_ ||
         mass_kg > gravity_max_mass_kg_) {
       std::ostringstream oss;
       oss << "Spindle gravity fit rejected: mass " << mass_kg << " kg outside ["
           << gravity_min_mass_kg_ << ", " << gravity_max_mass_kg_ << "].";
-      throw std::runtime_error(oss.str());
+      reject_reason = oss.str();
+      return false;
     }
 
     Eigen::MatrixXd A(3 * static_cast<Eigen::Index>(N), 3);
@@ -2450,12 +2558,14 @@ private:
       b.segment<3>(3 * static_cast<Eigen::Index>(i)) =
         Wc.row(static_cast<Eigen::Index>(i)).segment<3>(3).transpose();
     }
+
     const Eigen::Vector3d com_tcp_m = A.colPivHouseholderQr().solve(b);
     if (!com_tcp_m.allFinite() || com_tcp_m.norm() > gravity_max_com_norm_m_) {
       std::ostringstream oss;
       oss << "Spindle gravity fit rejected: CoM norm " << com_tcp_m.norm()
           << " m exceeds " << gravity_max_com_norm_m_ << " m.";
-      throw std::runtime_error(oss.str());
+      reject_reason = oss.str();
+      return false;
     }
 
     Eigen::Matrix<double,6,3> H = Eigen::Matrix<double,6,3>::Zero();
@@ -2469,13 +2579,181 @@ private:
       std::sqrt(residual.leftCols(3).squaredNorm() / static_cast<double>(N));
     const double torque_rms_nm =
       std::sqrt(residual.rightCols(3).squaredNorm() / static_cast<double>(N));
-    if (force_rms_n > gravity_max_force_rms_n_ ||
-        torque_rms_nm > gravity_max_torque_rms_nm_) {
+
+    out = GravityFitResult{};
+    out.indices = indices;
+    out.H = H;
+    out.h_full = h_full;
+    out.bias = bias;
+    out.com_tcp_m = com_tcp_m;
+    out.condition_number = condition_number;
+    out.mass_kg = mass_kg;
+    out.force_rms_n = force_rms_n;
+    out.torque_rms_nm = torque_rms_nm;
+    out.force_residual_n.resize(N, 0.0);
+    out.torque_residual_nm.resize(N, 0.0);
+    for (size_t i = 0; i < N; ++i) {
+      out.force_residual_n[i] = residual.row(static_cast<Eigen::Index>(i)).head<3>().norm();
+      out.torque_residual_nm[i] = residual.row(static_cast<Eigen::Index>(i)).tail<3>().norm();
+    }
+    return true;
+  }
+
+  GravityFitResult selectGravityFit()
+  {
+    const size_t total = gravity_pose_samples_.size();
+    const size_t min_good = gravityQualityMinPoseSamples();
+    if (total < min_good) {
+      throw std::runtime_error(
+        "Spindle gravity fit rejected: only " + std::to_string(total) +
+        " pose samples; need " + std::to_string(min_good) + ".");
+    }
+
+    std::vector<size_t> all_indices(total);
+    std::iota(all_indices.begin(), all_indices.end(), 0);
+
+    GravityFitResult full_fit;
+    std::string reject_reason;
+    if (!fitGravitySubset(all_indices, full_fit, reject_reason)) {
+      throw std::runtime_error(reject_reason);
+    }
+
+    RCLCPP_INFO(get_logger(),
+      "[GRAVITY_FIT] all n=%zu cond=%.3f mass=%.6fkg rms=[%.3fN %.4fNm]",
+      total, full_fit.condition_number, full_fit.mass_kg,
+      full_fit.force_rms_n, full_fit.torque_rms_nm);
+
+    if (!gravity_quality_select_enable_) {
+      if (full_fit.force_rms_n > gravity_max_force_rms_n_ ||
+          full_fit.torque_rms_nm > gravity_max_torque_rms_nm_) {
+        std::ostringstream oss;
+        oss << "Spindle gravity fit rejected: residual RMS force=" << full_fit.force_rms_n
+            << " N, torque=" << full_fit.torque_rms_nm << " Nm.";
+        throw std::runtime_error(oss.str());
+      }
+      return full_fit;
+    }
+
+    if (!gravity_quality_use_all_good_ && gravity_quality_max_pose_samples_ < min_good) {
+      throw std::runtime_error(
+        "Spindle gravity fit rejected: gravity_quality_max_pose_samples is smaller than required min_good.");
+    }
+
+    std::vector<GravityQualityCandidate> good_candidates;
+    std::vector<size_t> threshold_rejected;
+    for (size_t fit_i = 0; fit_i < full_fit.indices.size(); ++fit_i) {
+      const double force_res = full_fit.force_residual_n[fit_i];
+      const double torque_res = full_fit.torque_residual_nm[fit_i];
+      const bool force_ok =
+        gravity_quality_force_residual_max_n_ <= 0.0 ||
+        force_res <= gravity_quality_force_residual_max_n_;
+      const bool torque_ok =
+        gravity_quality_torque_residual_max_nm_ <= 0.0 ||
+        torque_res <= gravity_quality_torque_residual_max_nm_;
+      if (force_ok && torque_ok) {
+        good_candidates.push_back(
+          {full_fit.indices[fit_i], force_res, torque_res,
+           gravityQualityScore(force_res, torque_res)});
+      } else {
+        threshold_rejected.push_back(full_fit.indices[fit_i]);
+      }
+    }
+
+    if (good_candidates.size() < min_good) {
       std::ostringstream oss;
-      oss << "Spindle gravity fit rejected: residual RMS force=" << force_rms_n
-          << " N, torque=" << torque_rms_nm << " Nm.";
+      oss << "Spindle gravity fit rejected: only " << good_candidates.size()
+          << " good-quality pose samples; need " << min_good
+          << " (limits force<=" << gravity_quality_force_residual_max_n_
+          << "N torque<=" << gravity_quality_torque_residual_max_nm_ << "Nm).";
       throw std::runtime_error(oss.str());
     }
+
+    std::sort(good_candidates.begin(), good_candidates.end(),
+      [](const GravityQualityCandidate& a, const GravityQualityCandidate& b) {
+        if (a.score != b.score) return a.score < b.score;
+        return a.sample_index < b.sample_index;
+      });
+
+    size_t selected_count = good_candidates.size();
+    if (!gravity_quality_use_all_good_) {
+      selected_count = std::min(selected_count, gravity_quality_max_pose_samples_);
+    }
+    selected_count = std::max(selected_count, min_good);
+
+    std::vector<size_t> selected;
+    selected.reserve(selected_count);
+    for (size_t i = 0; i < selected_count; ++i) {
+      selected.push_back(good_candidates[i].sample_index);
+    }
+    std::sort(selected.begin(), selected.end());
+
+    RCLCPP_INFO(get_logger(),
+      "[GRAVITY_QUALITY] good=%zu/%zu selected=%zu min=%zu",
+      good_candidates.size(), total, selected.size(), min_good);
+
+    if (!threshold_rejected.empty()) {
+      RCLCPP_WARN(get_logger(),
+        "[GRAVITY_QUALITY] threshold_reject wp=%s",
+        formatGravityWpList(threshold_rejected).c_str());
+    }
+
+    GravityFitResult selected_fit;
+    while (true) {
+      if (!fitGravitySubset(selected, selected_fit, reject_reason)) {
+        throw std::runtime_error(reject_reason);
+      }
+
+      if (selected_fit.force_rms_n <= gravity_max_force_rms_n_ &&
+          selected_fit.torque_rms_nm <= gravity_max_torque_rms_nm_) {
+        RCLCPP_INFO(get_logger(),
+          "[GRAVITY_REFIT] kept=%zu/%zu cond=%.3f mass=%.6fkg rms=[%.3fN %.4fNm]",
+          selected_fit.indices.size(), total,
+          selected_fit.condition_number, selected_fit.mass_kg,
+          selected_fit.force_rms_n, selected_fit.torque_rms_nm);
+        RCLCPP_INFO(get_logger(),
+          "[GRAVITY_REFIT] wp=%s",
+          formatGravityWpList(selected_fit.indices).c_str());
+        return selected_fit;
+      }
+
+      if (selected.size() <= min_good) {
+        std::ostringstream oss;
+        oss << "Spindle gravity fit rejected: selected good pose RMS force="
+            << selected_fit.force_rms_n << " N, torque=" << selected_fit.torque_rms_nm
+            << " Nm with " << selected.size() << " poses; cannot drop below min_good="
+            << min_good << ".";
+        throw std::runtime_error(oss.str());
+      }
+
+      size_t worst_pos = 0;
+      double worst_score = -1.0;
+      for (size_t i = 0; i < selected_fit.indices.size(); ++i) {
+        const double score =
+          gravityQualityScore(selected_fit.force_residual_n[i], selected_fit.torque_residual_nm[i]);
+        if (score > worst_score) {
+          worst_score = score;
+          worst_pos = i;
+        }
+      }
+
+      const size_t rejected_sample_idx = selected_fit.indices[worst_pos];
+      RCLCPP_WARN(get_logger(),
+        "[GRAVITY_QUALITY] trim wp=%zu residual=[%.3fN %.4fNm] kept_after=%zu",
+        gravity_pose_samples_[rejected_sample_idx].waypoint_index + 1,
+        selected_fit.force_residual_n[worst_pos],
+        selected_fit.torque_residual_nm[worst_pos],
+        selected.size() - 1);
+      selected.erase(
+        std::remove(selected.begin(), selected.end(), rejected_sample_idx),
+        selected.end());
+    }
+  }
+
+  void finalizeGravityCalibration()
+  {
+    if (!gravity_calibration_enable_) return;
+    const GravityFitResult fit = selectGravityFit();
+    const size_t N = fit.indices.size();
 
     ensureParentDirectoryExists(gravity_yaml_path_);
     const std::string tmp_path = gravity_yaml_path_ + ".tmp";
@@ -2489,21 +2767,30 @@ private:
       ofs << "enabled: true\n";
       ofs << "frame: tcp\n";
       ofs << std::fixed << std::setprecision(prec);
-      ofs << "mass_kg: " << mass_kg << "\n";
-      ofs << "com_tcp_m: [" << com_tcp_m.x() << ", " << com_tcp_m.y() << ", "
-          << com_tcp_m.z() << "]\n";
+      ofs << "mass_kg: " << fit.mass_kg << "\n";
+      ofs << "com_tcp_m: [" << fit.com_tcp_m.x() << ", " << fit.com_tcp_m.y() << ", "
+          << fit.com_tcp_m.z() << "]\n";
       ofs << "matrix_6x3:\n";
       for (int r = 0; r < 6; ++r) {
-        ofs << "  - [" << H(r,0) << ", " << H(r,1) << ", " << H(r,2) << "]\n";
+        ofs << "  - [" << fit.H(r,0) << ", " << fit.H(r,1) << ", " << fit.H(r,2) << "]\n";
       }
       ofs << "fit:\n";
       ofs << "  pose_samples: " << N << "\n";
-      ofs << "  condition_number: " << condition_number << "\n";
-      ofs << "  force_rms_n: " << force_rms_n << "\n";
-      ofs << "  torque_rms_nm: " << torque_rms_nm << "\n";
+      ofs << "  captured_pose_samples: " << gravity_pose_samples_.size() << "\n";
+      ofs << "  selected_waypoints: [";
+      for (size_t i = 0; i < fit.indices.size(); ++i) {
+        if (i > 0) ofs << ", ";
+        ofs << (gravity_pose_samples_[fit.indices[i]].waypoint_index + 1);
+      }
+      ofs << "]\n";
+      ofs << "  quality_select_enable: " << (gravity_quality_select_enable_ ? "true" : "false") << "\n";
+      ofs << "  quality_min_pose_samples: " << gravityQualityMinPoseSamples() << "\n";
+      ofs << "  condition_number: " << fit.condition_number << "\n";
+      ofs << "  force_rms_n: " << fit.force_rms_n << "\n";
+      ofs << "  torque_rms_nm: " << fit.torque_rms_nm << "\n";
       ofs << "  unrestricted_matrix_6x3:\n";
       for (int r = 0; r < 6; ++r) {
-        ofs << "    - [" << h_full(r,0) << ", " << h_full(r,1) << ", " << h_full(r,2) << "]\n";
+        ofs << "    - [" << fit.h_full(r,0) << ", " << fit.h_full(r,1) << ", " << fit.h_full(r,2) << "]\n";
       }
       ofs.flush();
       if (!ofs.good()) throw std::runtime_error("Failed while writing gravity YAML: " + tmp_path);
@@ -2521,8 +2808,9 @@ private:
 
     RCLCPP_INFO(get_logger(),
       "[GRAVITY_SAVED] n=%zu cond=%.3f mass=%.6fkg com=[%.6f %.6f %.6f]m rms=[%.3fN %.4fNm]",
-      N, condition_number, mass_kg,
-      com_tcp_m.x(), com_tcp_m.y(), com_tcp_m.z(), force_rms_n, torque_rms_nm);
+      N, fit.condition_number, fit.mass_kg,
+      fit.com_tcp_m.x(), fit.com_tcp_m.y(), fit.com_tcp_m.z(),
+      fit.force_rms_n, fit.torque_rms_nm);
     RCLCPP_INFO(get_logger(), "[GRAVITY_SAVED] %s (backup=.bak)", gravity_yaml_path_.c_str());
     if (!deployGravityYamlRemote()) {
       RCLCPP_ERROR(get_logger(),
