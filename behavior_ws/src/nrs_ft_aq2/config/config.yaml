@@ -51,6 +51,10 @@ Print_switch: 1 # 1: Printing on, 0: Printing off
 gravity_compensation_enabled: true
 gravity_compensation_apply_handle: false
 gravity_compensation_apply_contact: true
+gravity_compensation_moment_axis_sign: [1.0, -1.0, -1.0]
+gravity_calibration_file: "behavior_ws/src/nrs_ft_aq2/config/spindle_gravity.yaml"
+tracker_to_sensor_rpy: [0.0, 0.0, 0.0]
+gravity_payload_origin_in_sensor_xyz: [0.0, 0.0, 0.0]
 gravity_compensation_axis_sign:
   - -1.0
   - 1.0

@@ -31,13 +31,71 @@ ros2 run vr_calibration vr_calibration --ros-args \
 - `/ur10skku/currentP`: `Float64MultiArray`, robot current pose `[x y z wx wy wz]`
 - `/raw_pose`: `PoseStamped`, Vive tracker raw pose
 - `/calibrated_pose`: `Float64MultiArray`, `T_SA` update 모드에서 현재 calibrated rotation을 읽기 위해 사용
+- `/ur10skku/ftdata_tcp_raw`: `WrenchStamped`, Y2FT_AQ가 publish하는 보상 전 TCP-frame robot FT 값
 
 주요 파일:
 
-- `vr_calibration/txt/for_vr_calibration_point_v6.txt`: target waypoint 파일
+- `vr_calibration/txt/for_vr_calibration_point_v7.txt`: 320 mm EE-to-TCP spindle용 기본 target waypoint 파일
 - `vr_calibration/txt/ur10_ee.txt`: 캡처된 EE pose 기록
 - `vr_calibration/txt/ur10_vr.txt`: 캡처된 VR pose 기록
 - `vive_tracker_ros2/yaml/calibration_matrix.yaml`: 최종 calibration YAML
+- `nrs_ft_aq2/config/spindle_gravity.yaml`: robot FT로 식별한 공통 spindle 중력보상 행렬
+
+## Spindle 중력보상 동시 calibration
+
+이 모드에서는 spindle을 로봇에 장착하고 **로봇 FT만 실행**한다. 교시장치의 `nrs_ft_aq2`는 실행하지 않는다.
+Y2FT_AQ는 센서 zero 이후의 값을 TCP 축으로만 회전한 `/ur10skku/ftdata_tcp_raw`를 제공하고,
+VR calibration 노드는 정지한 각 capture pose의 wrench 중앙값을 함께 저장한다.
+
+여러 자세에 대해 다음 모델을 식별한다.
+
+```text
+wrench_tcp = bias + G_spindle(6x3) * gravity_tcp
+```
+
+runtime에 저장되는 `G_spindle`은 자유 6x3 회귀값을 그대로 쓰지 않고, 식별한 질량과 3축 CoM으로 만든
+물리적으로 일관된 행렬이다. STL 형상, STL density, STL CoM은 사용하지 않는다. 센서 zero로 제거된 상수값은
+회귀의 `bias`가 흡수하며 runtime은 zero 자세와 현재 자세의 `delta gravity`에만 행렬을 적용한다.
+
+기본 v7 waypoint는 `EE2TCP` 길이 320 mm를 기준으로 만든다. 처음 8개 capture pose는 수직 spindle로
+중앙 작업공간의 위치 분포를 만들고, 나머지 24개는 EE를 안전한 고점 부근에 유지한 채 기존 v6에서 사용한
+자세를 회전 변화가 작은 순서로 배치한다. TCP/EE 끝점 범위와 중력 방향 분포를 수치 검증했지만, 이는 로봇 및
+주변 설비의 실제 collision model을 대신하지 않는다. 최초 실행은 반드시 저속/수동 정지 준비 상태에서 확인한다.
+
+실행 순서:
+
+```bash
+# nrs_forcecon@192.168.0.151
+cd /home/nrs_forcecon/dev_ws
+source install/setup.bash
+ros2 run Y2FT_AQ FTGetMain
+
+# eunseop_nrs3 (Vive tracker/robot waypoint 노드가 준비된 뒤)
+cd /home/eunseop/nrs_imitation/behavior_ws
+source install/setup.bash
+ros2 run vr_calibration vr_calibration
+```
+
+성공 조건을 모두 만족할 때만 로컬 `nrs_ft_aq2/config/spindle_gravity.yaml`을 교체하고 기존 파일은
+`.bak`으로 보존한다. 기본 설정에서는 passwordless SSH로 다음 원격 파일도 같은 YAML로 교체한다.
+
+```text
+nrs_forcecon@192.168.0.151:/home/nrs_forcecon/dev_ws/src/y2_ur10skku_control/Y2FT_AQ/config/spindle_gravity.yaml
+```
+
+원격 파일도 `.bak`으로 보존된다. Y2FT_AQ는 YAML을 시작할 때 읽으므로 calibration이 끝난 뒤 로봇 FT 노드를
+재시작해야 새 행렬이 적용된다. 교시장치 FT는 calibration 중 꺼져 있었으므로, 나중에 실행할 때 새 로컬 YAML을 읽는다.
+
+주요 성공 로그:
+
+```text
+[GRAVITY_CAPTURE] ...
+[GRAVITY_SAVED] n=... cond=... mass=... com=... rms=...
+[GRAVITY_REMOTE] updated ...
+```
+
+`[GRAVITY_REJECTED]`가 나오면 기존 gravity YAML은 유지된다. 대표적인 거부 조건은 자세 방향 rank 부족,
+condition number 초과, 비현실적인 질량/CoM, force/torque residual RMS 초과다.
 
 생성되는 YAML 행렬:
 

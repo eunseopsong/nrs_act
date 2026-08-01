@@ -33,6 +33,10 @@ DEFAULT_ROS_ARGS = [
     "-p", "fz_hard_limit:=0.0",
     "-p", "infer_hz:=5.0",
     "-p", "control_hz:=125.0",
+    # FLOW plans are 30 Hz trajectories. Replay the newest plan on that time
+    # axis with interpolation instead of ACT-style overlapping-chunk averaging.
+    "-p", "action_selection_mode:=trajectory_interp",
+    "-p", "trajectory_hz:=30.0",
     "-p", "temporal_agg_tau_steps:=20.0",
     "-p", "max_plans:=6",
     "-p", "contact_on_thr:=3.0",
@@ -45,6 +49,11 @@ DEFAULT_ROS_ARGS = [
     "-p", "gradcam_target:=z",
     "-p", "gradcam_overlay_topic:=/inference_single_cam/gradcam_overlay",
     "-p", "gradcam_global_overlay_topic:=/inference_single_cam/gradcam_overlay_global",
+    "-p", "modality_importance_enable:=true",
+    "-p", "modality_importance_every_n_infer:=5",
+    "-p", "modality_importance_target:=action_norm",
+    "-p", "modality_importance_target_horizon:=16",
+    "-p", "modality_importance_topic:=/inference_single_cam/modality_importance",
 ]
 
 

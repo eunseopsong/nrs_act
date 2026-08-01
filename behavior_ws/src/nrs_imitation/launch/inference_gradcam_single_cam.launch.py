@@ -42,6 +42,16 @@ def generate_launch_description():
     use_force_history = LaunchConfiguration("use_force_history")
     force_history_len = LaunchConfiguration("force_history_len")
     flow_infer_steps = LaunchConfiguration("flow_infer_steps")
+    flow_deterministic_noise = LaunchConfiguration("flow_deterministic_noise")
+    flow_noise_seed = LaunchConfiguration("flow_noise_seed")
+    action_selection_mode = LaunchConfiguration("action_selection_mode")
+    trajectory_hz = LaunchConfiguration("trajectory_hz")
+    cmd_safety_enable = LaunchConfiguration("cmd_safety_enable")
+    cmd_safety_max_xyz_from_current_mm = LaunchConfiguration("cmd_safety_max_xyz_from_current_mm")
+    cmd_safety_max_xy_from_start_mm = LaunchConfiguration("cmd_safety_max_xy_from_start_mm")
+    cmd_safety_max_z_down_from_start_mm = LaunchConfiguration("cmd_safety_max_z_down_from_start_mm")
+    cmd_safety_max_z_up_from_start_mm = LaunchConfiguration("cmd_safety_max_z_up_from_start_mm")
+    cmd_safety_latch_on_start_limit = LaunchConfiguration("cmd_safety_latch_on_start_limit")
 
     gradcam_enable = LaunchConfiguration("gradcam_enable")
     gradcam_publish = LaunchConfiguration("gradcam_publish")
@@ -54,6 +64,14 @@ def generate_launch_description():
     gradcam_save = LaunchConfiguration("gradcam_save")
     gradcam_save_dir = LaunchConfiguration("gradcam_save_dir")
     visualize = LaunchConfiguration("visualize")
+    modality_importance_enable = LaunchConfiguration("modality_importance_enable")
+    modality_importance_every_n_infer = LaunchConfiguration("modality_importance_every_n_infer")
+    modality_importance_target = LaunchConfiguration("modality_importance_target")
+    modality_importance_target_step = LaunchConfiguration("modality_importance_target_step")
+    modality_importance_target_horizon = LaunchConfiguration("modality_importance_target_horizon")
+    modality_importance_ema_alpha = LaunchConfiguration("modality_importance_ema_alpha")
+    modality_importance_topic = LaunchConfiguration("modality_importance_topic")
+    visualize_modality_importance = LaunchConfiguration("visualize_modality_importance")
 
     return LaunchDescription([
         DeclareLaunchArgument("ckpt_dir", default_value=""),
@@ -88,6 +106,19 @@ def generate_launch_description():
         DeclareLaunchArgument("use_force_history", default_value="true"),
         DeclareLaunchArgument("force_history_len", default_value="10"),
         DeclareLaunchArgument("flow_infer_steps", default_value="10"),
+        DeclareLaunchArgument("flow_deterministic_noise", default_value="true"),
+        DeclareLaunchArgument("flow_noise_seed", default_value="0"),
+        DeclareLaunchArgument("action_selection_mode", default_value="trajectory_interp"),
+        DeclareLaunchArgument("trajectory_hz", default_value="30.0"),
+
+        # filtered58 demo envelope maxima were approximately XY=134.9 mm,
+        # Z-down=79.3 mm, Z-up=86.1 mm. These defaults retain a small margin.
+        DeclareLaunchArgument("cmd_safety_enable", default_value="true"),
+        DeclareLaunchArgument("cmd_safety_max_xyz_from_current_mm", default_value="200.0"),
+        DeclareLaunchArgument("cmd_safety_max_xy_from_start_mm", default_value="140.0"),
+        DeclareLaunchArgument("cmd_safety_max_z_down_from_start_mm", default_value="85.0"),
+        DeclareLaunchArgument("cmd_safety_max_z_up_from_start_mm", default_value="95.0"),
+        DeclareLaunchArgument("cmd_safety_latch_on_start_limit", default_value="true"),
 
         DeclareLaunchArgument("gradcam_enable", default_value="true"),
         DeclareLaunchArgument("gradcam_publish", default_value="true"),
@@ -100,6 +131,17 @@ def generate_launch_description():
         DeclareLaunchArgument("gradcam_save", default_value="false"),
         DeclareLaunchArgument("gradcam_save_dir", default_value="~/nrs_imitation/gradcam"),
         DeclareLaunchArgument("visualize", default_value="true"),
+        DeclareLaunchArgument("modality_importance_enable", default_value="true"),
+        DeclareLaunchArgument("modality_importance_every_n_infer", default_value="5"),
+        DeclareLaunchArgument("modality_importance_target", default_value="action_norm"),
+        DeclareLaunchArgument("modality_importance_target_step", default_value="0"),
+        DeclareLaunchArgument("modality_importance_target_horizon", default_value="16"),
+        DeclareLaunchArgument("modality_importance_ema_alpha", default_value="0.80"),
+        DeclareLaunchArgument(
+            "modality_importance_topic",
+            default_value="/inference_single_cam/modality_importance",
+        ),
+        DeclareLaunchArgument("visualize_modality_importance", default_value="true"),
 
         Node(
             package="nrs_imitation",
@@ -149,6 +191,26 @@ def generate_launch_description():
                 "use_force_history": ParameterValue(use_force_history, value_type=bool),
                 "force_history_len": ParameterValue(force_history_len, value_type=int),
                 "flow_infer_steps": ParameterValue(flow_infer_steps, value_type=int),
+                "flow_deterministic_noise": ParameterValue(flow_deterministic_noise, value_type=bool),
+                "flow_noise_seed": ParameterValue(flow_noise_seed, value_type=int),
+                "action_selection_mode": action_selection_mode,
+                "trajectory_hz": ParameterValue(trajectory_hz, value_type=float),
+                "cmd_safety_enable": ParameterValue(cmd_safety_enable, value_type=bool),
+                "cmd_safety_max_xyz_from_current_mm": ParameterValue(
+                    cmd_safety_max_xyz_from_current_mm, value_type=float
+                ),
+                "cmd_safety_max_xy_from_start_mm": ParameterValue(
+                    cmd_safety_max_xy_from_start_mm, value_type=float
+                ),
+                "cmd_safety_max_z_down_from_start_mm": ParameterValue(
+                    cmd_safety_max_z_down_from_start_mm, value_type=float
+                ),
+                "cmd_safety_max_z_up_from_start_mm": ParameterValue(
+                    cmd_safety_max_z_up_from_start_mm, value_type=float
+                ),
+                "cmd_safety_latch_on_start_limit": ParameterValue(
+                    cmd_safety_latch_on_start_limit, value_type=bool
+                ),
                 "use_stain_mask": ParameterValue(use_stain_mask, value_type=bool),
                 "stain_mask_topic": stain_mask_topic,
                 "cmd_topic": cmd_topic,
@@ -162,6 +224,23 @@ def generate_launch_description():
                 "gradcam_overlay_topic": gradcam_overlay_topic,
                 "gradcam_save": ParameterValue(gradcam_save, value_type=bool),
                 "gradcam_save_dir": gradcam_save_dir,
+                "modality_importance_enable": ParameterValue(
+                    modality_importance_enable, value_type=bool
+                ),
+                "modality_importance_every_n_infer": ParameterValue(
+                    modality_importance_every_n_infer, value_type=int
+                ),
+                "modality_importance_target": modality_importance_target,
+                "modality_importance_target_step": ParameterValue(
+                    modality_importance_target_step, value_type=int
+                ),
+                "modality_importance_target_horizon": ParameterValue(
+                    modality_importance_target_horizon, value_type=int
+                ),
+                "modality_importance_ema_alpha": ParameterValue(
+                    modality_importance_ema_alpha, value_type=float
+                ),
+                "modality_importance_topic": modality_importance_topic,
             }],
         ),
 
@@ -172,5 +251,14 @@ def generate_launch_description():
             output="screen",
             arguments=[gradcam_overlay_topic],
             condition=IfCondition(visualize),
+        ),
+
+        Node(
+            package="rqt_image_view",
+            executable="rqt_image_view",
+            name="modality_importance_viewer",
+            output="screen",
+            arguments=[modality_importance_topic],
+            condition=IfCondition(visualize_modality_importance),
         ),
     ])

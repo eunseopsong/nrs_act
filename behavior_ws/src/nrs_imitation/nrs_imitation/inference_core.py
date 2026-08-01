@@ -125,6 +125,45 @@ def _beta_from_tau(dt: float, tau: float) -> float:
     return float(1.0 - math.exp(-float(dt) / float(tau)))
 
 
+def _start_pose_envelope_violation(
+    cmd_xyz: np.ndarray,
+    start_xyz: np.ndarray,
+    *,
+    max_xy_mm: float,
+    max_z_down_mm: float,
+    max_z_up_mm: float,
+) -> Tuple[str, np.ndarray, float]:
+    """Return violation reason plus start-relative delta/XY radius."""
+    cmd = np.asarray(cmd_xyz, dtype=np.float32).reshape(-1)
+    start = np.asarray(start_xyz, dtype=np.float32).reshape(-1)
+    if cmd.size < 3 or start.size < 3:
+        return "invalid start-envelope xyz", np.zeros(3, dtype=np.float32), 0.0
+
+    delta = (cmd[:3] - start[:3]).astype(np.float32)
+    xy_radius = float(np.linalg.norm(delta[:2]))
+    dz = float(delta[2])
+
+    if max_xy_mm > 0.0 and xy_radius > float(max_xy_mm):
+        return (
+            f"start-relative XY radius {xy_radius:.3f}mm exceeds {float(max_xy_mm):.3f}mm",
+            delta,
+            xy_radius,
+        )
+    if max_z_down_mm > 0.0 and dz < -float(max_z_down_mm):
+        return (
+            f"start-relative Z down {-dz:.3f}mm exceeds {float(max_z_down_mm):.3f}mm",
+            delta,
+            xy_radius,
+        )
+    if max_z_up_mm > 0.0 and dz > float(max_z_up_mm):
+        return (
+            f"start-relative Z up {dz:.3f}mm exceeds {float(max_z_up_mm):.3f}mm",
+            delta,
+            xy_radius,
+        )
+    return "", delta, xy_radius
+
+
 # ============================================================
 # Helpers (checkpoint auto-discovery)
 # ============================================================
@@ -918,6 +957,7 @@ def _fix_policy_output_seq(seq: torch.Tensor, chunk_size: int, policy_class: str
 class Plan:
     t0: float
     seq_den: np.ndarray  # (T,9) polishing or (T,10) gripper, denorm
+    local_anchor_applied: bool = False
 
 
 # ============================================================
@@ -1067,8 +1107,29 @@ class NodeCmdMotionInfer(Node):
         self.declare_parameter("gradcam_save_dir", "~/nrs_imitation/gradcam")
         self.declare_parameter("gradcam_log_every_n", 5)
 
+        # Modality attribution is intentionally separate from Grad-CAM. It
+        # compares normalized policy-output changes after independently
+        # ablating position, force, and RGB, then publishes a dashboard image.
+        self.declare_parameter("modality_importance_enable", True)
+        self.declare_parameter("modality_importance_every_n_infer", 5)
+        self.declare_parameter("modality_importance_target", "action_norm")
+        self.declare_parameter("modality_importance_target_step", 0)
+        self.declare_parameter("modality_importance_target_horizon", 16)
+        self.declare_parameter("modality_importance_ema_alpha", 0.80)
+        self.declare_parameter("modality_importance_history_len", 120)
+        self.declare_parameter(
+            "modality_importance_topic", "/inference_core/modality_importance"
+        )
+        self.declare_parameter("modality_importance_log_every_n", 5)
+
         self.declare_parameter("control_hz", 125.0)
         self.declare_parameter("infer_hz", 5.0)
+
+        # FLOW is a trajectory generator, so consume the newest trajectory on
+        # its training time axis. "auto" selects this for FLOW and keeps legacy
+        # temporal aggregation for ACT/Diffusion checkpoints.
+        self.declare_parameter("action_selection_mode", "auto")  # auto | trajectory_interp | temporal_agg
+        self.declare_parameter("trajectory_hz", 30.0)
 
         # -----------------------------
         # New observation encoder / force history
@@ -1165,6 +1226,12 @@ class NodeCmdMotionInfer(Node):
         # a command whose xyz target is implausibly far from /currentP.
         self.declare_parameter("cmd_safety_enable", True)
         self.declare_parameter("cmd_safety_max_xyz_from_current_mm", 200.0)
+        # Optional policy-start envelope. Values <= 0 disable that axis limit.
+        # The polishing launch enables limits derived from the filtered58 demos.
+        self.declare_parameter("cmd_safety_max_xy_from_start_mm", 0.0)
+        self.declare_parameter("cmd_safety_max_z_down_from_start_mm", 0.0)
+        self.declare_parameter("cmd_safety_max_z_up_from_start_mm", 0.0)
+        self.declare_parameter("cmd_safety_latch_on_start_limit", True)
 
         # policy config
         self.declare_parameter("kl_weight", 10.0)
@@ -1188,6 +1255,10 @@ class NodeCmdMotionInfer(Node):
 
         # FLOW policy config
         self.declare_parameter("flow_infer_steps", 10)
+        # When enabled, every online plan starts from the same seeded FLOW noise.
+        # The same tensor is also reused by the Grad-CAM backward pass.
+        self.declare_parameter("flow_deterministic_noise", False)
+        self.declare_parameter("flow_noise_seed", 0)
         self.declare_parameter("flow_train_eps", 1e-4)
         self.declare_parameter("flow_loss_type", "mse")
         self.declare_parameter("flow_obs_hidden_dim", 256)
@@ -1343,9 +1414,58 @@ class NodeCmdMotionInfer(Node):
             except Exception as e:
                 raise RuntimeError(f"Failed to create gradcam_save_dir={self.gradcam_save_dir}: {e}")
 
+        self.modality_importance_enable = bool(
+            self.get_parameter("modality_importance_enable").value
+        )
+        self.modality_importance_every_n_infer = max(
+            1, int(self.get_parameter("modality_importance_every_n_infer").value)
+        )
+        self.modality_importance_target = str(
+            self.get_parameter("modality_importance_target").value
+        ).strip().lower()
+        self.modality_importance_target_step = max(
+            0, int(self.get_parameter("modality_importance_target_step").value)
+        )
+        self.modality_importance_target_horizon = max(
+            1, int(self.get_parameter("modality_importance_target_horizon").value)
+        )
+        self.modality_importance_ema_alpha = float(np.clip(
+            float(self.get_parameter("modality_importance_ema_alpha").value), 0.0, 0.999
+        ))
+        self.modality_importance_history_len = max(
+            10, int(self.get_parameter("modality_importance_history_len").value)
+        )
+        self.modality_importance_topic = str(
+            self.get_parameter("modality_importance_topic").value
+        ).strip()
+        self.modality_importance_log_every_n = max(
+            1, int(self.get_parameter("modality_importance_log_every_n").value)
+        )
+        if self.modality_importance_enable and not self.modality_importance_topic:
+            raise RuntimeError("modality_importance_topic must be non-empty when enabled")
+        self._modality_importance_count = 0
+        self._modality_importance_fail_count = 0
+        self._modality_importance_last_log_t = 0.0
+        self._modality_importance_ema: Optional[np.ndarray] = None
+        self._modality_importance_worker_lock = threading.Lock()
+        self._modality_importance_worker_busy = False
+        self._modality_importance_worker_thread: Optional[threading.Thread] = None
+        self._modality_importance_history: Deque[np.ndarray] = deque(
+            maxlen=self.modality_importance_history_len
+        )
+
         self.control_hz = float(self.get_parameter("control_hz").value)
         self.infer_hz = float(self.get_parameter("infer_hz").value)
 
+        self.action_selection_mode = str(self.get_parameter("action_selection_mode").value).strip().lower()
+        self.trajectory_hz = max(1e-6, float(self.get_parameter("trajectory_hz").value))
+        if self.action_selection_mode == "auto":
+            self.action_selection_mode = "trajectory_interp" if self.policy_class == "FLOW" else "temporal_agg"
+        if self.action_selection_mode not in ("trajectory_interp", "temporal_agg"):
+            raise RuntimeError(
+                "action_selection_mode must be auto, trajectory_interp, or temporal_agg, "
+                f"got: {self.action_selection_mode}"
+            )
         self.use_force_history = bool(self.get_parameter("use_force_history").value)
         self.force_history_len = int(self.get_parameter("force_history_len").value)
 
@@ -1417,6 +1537,18 @@ class NodeCmdMotionInfer(Node):
         self.policy_z_offset_mm = float(self.get_parameter("policy_z_offset_mm").value)
         self.cmd_safety_enable = bool(self.get_parameter("cmd_safety_enable").value)
         self.cmd_safety_max_xyz_from_current_mm = float(self.get_parameter("cmd_safety_max_xyz_from_current_mm").value)
+        self.cmd_safety_max_xy_from_start_mm = max(
+            0.0, float(self.get_parameter("cmd_safety_max_xy_from_start_mm").value)
+        )
+        self.cmd_safety_max_z_down_from_start_mm = max(
+            0.0, float(self.get_parameter("cmd_safety_max_z_down_from_start_mm").value)
+        )
+        self.cmd_safety_max_z_up_from_start_mm = max(
+            0.0, float(self.get_parameter("cmd_safety_max_z_up_from_start_mm").value)
+        )
+        self.cmd_safety_latch_on_start_limit = bool(
+            self.get_parameter("cmd_safety_latch_on_start_limit").value
+        )
 
         if abs(self.policy_z_offset_mm) > 1e-9 and self.action_type != "absolute":
             self.get_logger().warn(
@@ -1476,6 +1608,8 @@ class NodeCmdMotionInfer(Node):
 
         # FLOW policy config
         self.flow_infer_steps = int(self.get_parameter("flow_infer_steps").value)
+        self.flow_deterministic_noise = bool(self.get_parameter("flow_deterministic_noise").value)
+        self.flow_noise_seed = int(self.get_parameter("flow_noise_seed").value)
         self.flow_train_eps = float(self.get_parameter("flow_train_eps").value)
         self.flow_loss_type = str(self.get_parameter("flow_loss_type").value)
         self.flow_obs_hidden_dim = int(self.get_parameter("flow_obs_hidden_dim").value)
@@ -1569,12 +1703,20 @@ class NodeCmdMotionInfer(Node):
             f"target={self.gradcam_target}, step={self.gradcam_target_step}, horizon={self.gradcam_target_horizon}, "
             f"publish={int(self.gradcam_publish)}, save={int(self.gradcam_save)}"
         )
+        self.get_logger().info(
+            f"[FLOW-NOISE] deterministic={int(self.flow_deterministic_noise)}, "
+            f"seed={self.flow_noise_seed}, control_gradcam_shared=1"
+        )
 
         # validate paths / resolve checkpoint
         if not self.act_root or not os.path.isdir(self.act_root):
             raise RuntimeError(f"act_root invalid: {self.act_root}")
         if self.policy_class not in ("ACT", "DIFFUSION", "FLOW"):
             raise RuntimeError(f"policy_class must be ACT, DIFFUSION, or FLOW, got: {self.policy_class}")
+        if self.flow_deterministic_noise and self.policy_class != "FLOW":
+            self.get_logger().warn(
+                f"[FLOW-NOISE] deterministic noise requested for policy_class={self.policy_class}; ignored."
+            )
 
         raw_ckpt_dir = self.ckpt_dir
         self.ckpt_dir = _resolve_checkpoint_dir(
@@ -1710,8 +1852,12 @@ class NodeCmdMotionInfer(Node):
         # Inference diagnostics: helps identify why no action plan is generated.
         self._infer_wait_last_log = 0.0
         self._infer_plan_count = 0
+        self._flow_fixed_initial_noise: Optional[torch.Tensor] = None
+        self._flow_noise_create_count = 0
         self._ctrl_no_plan_last_log = 0.0
         self._cmd_safety_last_log = 0.0
+        self._cmd_safety_latched = False
+        self._cmd_safety_latch_reason = ""
         self._demo_start_safety_last_log = 0.0
         self._last_gripper_cmd: Optional[int] = None
         self._last_gripper_cmd_t: Optional[float] = None
@@ -1809,9 +1955,10 @@ class NodeCmdMotionInfer(Node):
             self.create_subscription(Int32, self.gripper_position_topic, self._on_gripper_position, vec_qos)
             self.create_subscription(Float32, self.gripper_current_topic, self._on_gripper_current, vec_qos)
 
-        self.pub_cmd = self.create_publisher(Float64MultiArray, self.cmd_topic, 10)
+        self.pub_cmd = None
         self.pub_gripper_cmd = None
         self.pub_gripper_goal_current = None
+        self.pub_cmd = self.create_publisher(Float64MultiArray, self.cmd_topic, 10)
         if self.use_gripper:
             self.pub_gripper_cmd = self.create_publisher(Int32, self.gripper_command_topic, 10)
             self.pub_gripper_goal_current = self.create_publisher(
@@ -1827,6 +1974,16 @@ class NodeCmdMotionInfer(Node):
             if self.use_global_image:
                 self.pub_gradcam_global_overlay = self.create_publisher(Image, self.gradcam_global_overlay_topic, 1)
                 self.get_logger().info(f"[GRADCAM] publishing global overlay image: {self.gradcam_global_overlay_topic}")
+
+        self.pub_modality_importance = None
+        if self.modality_importance_enable:
+            modality_qos = _qos(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+            self.pub_modality_importance = self.create_publisher(
+                Image, self.modality_importance_topic, modality_qos
+            )
+            self.get_logger().info(
+                f"[MODALITY] publishing standalone dashboard: {self.modality_importance_topic}"
+            )
 
         self.timer_control = self.create_timer(self.dt_control, self._on_control_timer)
         self.timer_infer = self.create_timer(self.dt_infer, self._on_infer_timer)
@@ -1847,6 +2004,7 @@ class NodeCmdMotionInfer(Node):
             f"  policy_class={self.policy_class} phase_mode={self.phase_mode}\n"
             f"  control_hz={self.control_hz} infer_hz={self.infer_hz}\n"
             f"  use_force_history={int(self.use_force_history)} force_history_len={self.force_history_len}\n"
+            f"  FLOW_NOISE(deterministic={int(self.flow_deterministic_noise)}, seed={self.flow_noise_seed}, control_gradcam_shared=1)\n"
             f"  gripper_history(enable={int(self.use_gripper_history)}, "
             f"hz={self.gripper_history_hz:.3f}, len={self.gripper_history_len}, "
             f"sync_slop={self.gripper_history_sync_slop_sec:.3f}s, "
@@ -1854,7 +2012,9 @@ class NodeCmdMotionInfer(Node):
             f"  diffusion_infer_steps={self.diffusion_infer_steps}\n"
             f"  tau_sec={self.tau_sec} startup_ramp_sec={self.startup_ramp_sec}\n"
             f"  step_caps(pos_mm={self.step_cap_pos_mm}, ang_rad={self.step_cap_ang_rad}, fz={self.step_cap_fz})\n"
-            f"  temporal_agg={int(self.use_temporal_agg)} mode={self.temporal_agg_mode} tau_steps={self.temporal_agg_tau_steps} max_plans={self.max_plans}\n"
+            f"  action_selection={self.action_selection_mode} trajectory_hz={self.trajectory_hz:.3f} "
+            f"temporal_agg={int(self.use_temporal_agg)} mode={self.temporal_agg_mode} "
+            f"tau_steps={self.temporal_agg_tau_steps} max_plans={self.max_plans}\n"
             f"  contact_gate(on={self.contact_on_thr}, off={self.contact_off_thr}) clear_on_change={int(self.clear_plans_on_contact_change)}\n"
             f"  force_xy_cmd(enable={int(self.force_xy_cmd_enable)}, hard_limit={self.force_xy_hard_limit}N)\n"
             f"  force_z_cmd(upper_limit={fz_limit_desc}, nonnegative=1)\n"
@@ -1868,9 +2028,26 @@ class NodeCmdMotionInfer(Node):
             f"  DEMO_START(auto={int(self.auto_move_to_demo_start)}, move_sec={self.demo_start_move_sec}, hold_sec={self.demo_start_hold_sec}, z_offset_mm={self.demo_start_z_offset_mm})\n"
             f"  DEMO_START_SAFETY(max_align_dist_mm={self.demo_start_max_align_dist_mm})\n"
             f"  POLICY_OUTPUT(z_offset_mm={self.policy_z_offset_mm})\n"
-            f"  CMD_SAFETY(enable={int(self.cmd_safety_enable)}, max_xyz_from_current_mm={self.cmd_safety_max_xyz_from_current_mm})\n"
+            f"  CMD_SAFETY(enable={int(self.cmd_safety_enable)}, max_xyz_from_current_mm={self.cmd_safety_max_xyz_from_current_mm}, "
+            f"start_xy_mm={self.cmd_safety_max_xy_from_start_mm}, "
+            f"start_z_down_mm={self.cmd_safety_max_z_down_from_start_mm}, "
+            f"start_z_up_mm={self.cmd_safety_max_z_up_from_start_mm}, "
+            f"latch={int(self.cmd_safety_latch_on_start_limit)})\n"
             f"  GRADCAM(enable={int(self.gradcam_enable)}, layer={self._gradcam_target_layer_name}, target={self.gradcam_target}, every_n_infer={self.gradcam_every_n_infer}, topic={self.gradcam_overlay_topic}, global_topic={self.gradcam_global_overlay_topic if self.use_global_image else '(disabled)'})\n"
+            f"  MODALITY(enable={int(self.modality_importance_enable)}, target={self.modality_importance_target}, "
+            f"step={self.modality_importance_target_step}, horizon={self.modality_importance_target_horizon}, "
+            f"every_n_infer={self.modality_importance_every_n_infer}, topic={self.modality_importance_topic})\n"
         )
+
+    def destroy_node(self):
+        worker = getattr(self, "_modality_importance_worker_thread", None)
+        if (
+            worker is not None
+            and worker.is_alive()
+            and worker is not threading.current_thread()
+        ):
+            worker.join(timeout=2.0)
+        return super().destroy_node()
 
     # ------------------------------------------------------------
     # Small helpers (force extraction / history)
@@ -1924,6 +2101,44 @@ class NodeCmdMotionInfer(Node):
     # ------------------------------------------------------------
     # Grad-CAM debug helpers
     # ------------------------------------------------------------
+    def _flow_initial_noise_for_plan(self, q_t: torch.Tensor) -> Optional[torch.Tensor]:
+        """Create one FLOW initial-noise tensor shared by control and Grad-CAM."""
+        if self.policy_class != "FLOW" or self.use_gripper:
+            return None
+
+        batch = int(q_t.shape[0])
+        horizon = int(getattr(self.policy, "num_queries", self.chunk_size))
+        action_dim = int(getattr(self.policy, "action_dim", self.action_dim))
+        shape = (batch, horizon, action_dim)
+
+        if self.flow_deterministic_noise:
+            cached = self._flow_fixed_initial_noise
+            if (
+                cached is None
+                or tuple(cached.shape) != shape
+                or cached.device != q_t.device
+                or cached.dtype != q_t.dtype
+            ):
+                generator = torch.Generator(device=q_t.device)
+                generator.manual_seed(int(self.flow_noise_seed) % (2**63 - 1))
+                cached = torch.randn(
+                    shape,
+                    device=q_t.device,
+                    dtype=q_t.dtype,
+                    generator=generator,
+                )
+                self._flow_fixed_initial_noise = cached.detach()
+                self.get_logger().warn(
+                    f"[FLOW-NOISE] initialized fixed noise seed={self.flow_noise_seed} "
+                    f"shape={shape} device={q_t.device}"
+                )
+            noise = self._flow_fixed_initial_noise
+        else:
+            noise = torch.randn(shape, device=q_t.device, dtype=q_t.dtype)
+
+        self._flow_noise_create_count += 1
+        return noise
+
     def _setup_gradcam_hooks(self):
         if not self.gradcam_enable:
             return
@@ -1968,15 +2183,24 @@ class NodeCmdMotionInfer(Node):
             f"target={self.gradcam_target}, every_n_infer={self.gradcam_every_n_infer}"
         )
 
-    def _select_gradcam_scalar(self, seq_phys: torch.Tensor) -> torch.Tensor:
-        if seq_phys.dim() != 2 or seq_phys.shape[-1] not in (9, 10, 11):
-            raise RuntimeError(f"Grad-CAM seq must be (T,9), (T,10), or (T,11), got {tuple(seq_phys.shape)}")
+    def _select_action_scalar(
+        self,
+        seq: torch.Tensor,
+        *,
+        target: str,
+        target_step: int,
+        target_horizon: int,
+    ) -> torch.Tensor:
+        if seq.dim() != 2 or seq.shape[-1] not in (9, 10, 11):
+            raise RuntimeError(
+                f"attribution seq must be (T,9), (T,10), or (T,11), got {tuple(seq.shape)}"
+            )
 
-        T = int(seq_phys.shape[0])
-        s = min(max(0, int(self.gradcam_target_step)), max(0, T - 1))
-        e = min(T, s + max(1, int(self.gradcam_target_horizon)))
-        block = seq_phys[s:e]
-        target = str(self.gradcam_target or "z").strip().lower()
+        T = int(seq.shape[0])
+        s = min(max(0, int(target_step)), max(0, T - 1))
+        e = min(T, s + max(1, int(target_horizon)))
+        block = seq[s:e]
+        target = str(target or "z").strip().lower()
 
         if target in ("x", "cmd_x"):
             return block[:, 0].mean()
@@ -2018,12 +2242,21 @@ class NodeCmdMotionInfer(Node):
             return torch.linalg.norm(block[:, 0:9], dim=-1).mean()
         return block[:, 2].mean()
 
+    def _select_gradcam_scalar(self, seq_phys: torch.Tensor) -> torch.Tensor:
+        return self._select_action_scalar(
+            seq_phys,
+            target=self.gradcam_target,
+            target_step=self.gradcam_target_step,
+            target_horizon=self.gradcam_target_horizon,
+        )
+
     def _gradcam_policy_forward(
         self,
         q_gc: torch.Tensor,
         img_gc: torch.Tensor,
         fh_gc: Optional[torch.Tensor],
         stain_mask_gc: Optional[torch.Tensor],
+        flow_initial_noise_gc: Optional[torch.Tensor],
         gripper_position_gc: Optional[torch.Tensor],
         gripper_current_gc: Optional[torch.Tensor],
         gripper_history_gc: Optional[torch.Tensor],
@@ -2045,7 +2278,11 @@ class NodeCmdMotionInfer(Node):
                     B = int(q_gc.shape[0])
                     T = int(getattr(self.policy, "num_queries", self.chunk_size))
                     Da = int(getattr(self.policy, "action_dim", self.action_dim))
-                    z = torch.randn(B, T, Da, device=q_gc.device, dtype=q_gc.dtype)
+                    z = (
+                        flow_initial_noise_gc.to(device=q_gc.device, dtype=q_gc.dtype).clone()
+                        if flow_initial_noise_gc is not None
+                        else torch.randn(B, T, Da, device=q_gc.device, dtype=q_gc.dtype)
+                    )
                     dt = 1.0 / float(steps)
                     for k in range(steps):
                         t = torch.full((B,), (k + 0.5) / float(steps), device=q_gc.device, dtype=q_gc.dtype)
@@ -2069,15 +2306,25 @@ class NodeCmdMotionInfer(Node):
                         image=img_gc,
                         force_history=fh_gc,
                         stain_mask=stain_mask_gc,
+                        initial_noise=flow_initial_noise_gc,
                     )
-                return self.policy.sample_action_with_grad(qpos=q_gc, image=img_gc, stain_mask=stain_mask_gc)
+                return self.policy.sample_action_with_grad(
+                    qpos=q_gc,
+                    image=img_gc,
+                    stain_mask=stain_mask_gc,
+                    initial_noise=flow_initial_noise_gc,
+                )
 
             if hasattr(self.policy, "predict_velocity"):
                 steps = max(1, int(getattr(self.policy, "flow_infer_steps", self.flow_infer_steps)))
                 B = int(q_gc.shape[0])
                 T = int(getattr(self.policy, "num_queries", self.chunk_size))
                 Da = int(getattr(self.policy, "action_dim", 9))
-                z = torch.randn(B, T, Da, device=q_gc.device, dtype=q_gc.dtype)
+                z = (
+                    flow_initial_noise_gc.to(device=q_gc.device, dtype=q_gc.dtype).clone()
+                    if flow_initial_noise_gc is not None
+                    else torch.randn(B, T, Da, device=q_gc.device, dtype=q_gc.dtype)
+                )
                 dt = 1.0 / float(steps)
                 for k in range(steps):
                     t = torch.full((B,), (k + 0.5) / float(steps), device=q_gc.device, dtype=q_gc.dtype)
@@ -2112,6 +2359,7 @@ class NodeCmdMotionInfer(Node):
         img_t: torch.Tensor,
         force_hist_t: Optional[torch.Tensor],
         stain_mask_t: Optional[torch.Tensor],
+        flow_initial_noise_t: Optional[torch.Tensor],
         gripper_position_t: Optional[torch.Tensor] = None,
         gripper_current_t: Optional[torch.Tensor] = None,
         gripper_history_t: Optional[torch.Tensor] = None,
@@ -2143,6 +2391,9 @@ class NodeCmdMotionInfer(Node):
             img_gc.requires_grad_(True)
             fh_gc = None if force_hist_t is None else force_hist_t.detach().clone()
             stain_mask_gc = None if stain_mask_t is None else stain_mask_t.detach().clone()
+            flow_initial_noise_gc = (
+                None if flow_initial_noise_t is None else flow_initial_noise_t.detach().clone()
+            )
             gp_gc = None if gripper_position_t is None else gripper_position_t.detach().clone()
             gc_gc = None if gripper_current_t is None else gripper_current_t.detach().clone()
             gh_gc = None if gripper_history_t is None else gripper_history_t.detach().clone()
@@ -2153,6 +2404,7 @@ class NodeCmdMotionInfer(Node):
                     img_gc=img_gc,
                     fh_gc=fh_gc,
                     stain_mask_gc=stain_mask_gc,
+                    flow_initial_noise_gc=flow_initial_noise_gc,
                     gripper_position_gc=gp_gc,
                     gripper_current_gc=gc_gc,
                     gripper_history_gc=gh_gc,
@@ -2247,6 +2499,395 @@ class NodeCmdMotionInfer(Node):
                     p.requires_grad_(req)
             self._gradcam_activation = None
             self._gradcam_gradient = None
+
+    def _render_modality_importance_rgb(
+        self,
+        *,
+        raw_scores: np.ndarray,
+        raw_percent: np.ndarray,
+        smooth_percent: np.ndarray,
+    ) -> np.ndarray:
+        if cv2 is None:
+            raise RuntimeError("OpenCV is required for modality-importance visualization")
+
+        width, height = 920, 600
+        canvas = np.full((height, width, 3), 248, dtype=np.uint8)
+        names = ("POSITION", "FORCE", "IMAGE")
+        colors = ((52, 152, 219), (230, 126, 34), (46, 180, 100))
+
+        cv2.putText(
+            canvas,
+            "LIVE OBSERVATION MODALITY IMPORTANCE",
+            (32, 42),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.88,
+            (20, 20, 20),
+            2,
+            cv2.LINE_AA,
+        )
+        subtitle = (
+            f"batched FLOW velocity change at t=0.5 | target={self.modality_importance_target} "
+            f"steps={self.modality_importance_target_step}:"
+            f"{self.modality_importance_target_step + self.modality_importance_target_horizon}"
+        )
+        cv2.putText(
+            canvas, subtitle, (32, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.48,
+            (70, 70, 70), 1, cv2.LINE_AA,
+        )
+
+        bar_x0, bar_x1 = 205, 850
+        for idx, (name, color) in enumerate(zip(names, colors)):
+            y = 118 + idx * 82
+            cv2.putText(
+                canvas, name, (32, y + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.66,
+                (25, 25, 25), 2, cv2.LINE_AA,
+            )
+            cv2.rectangle(canvas, (bar_x0, y), (bar_x1, y + 31), (220, 220, 220), -1)
+            fill_x = bar_x0 + int(round((bar_x1 - bar_x0) * float(smooth_percent[idx])))
+            cv2.rectangle(canvas, (bar_x0, y), (fill_x, y + 31), color, -1)
+            label = (
+                f"{100.0 * float(smooth_percent[idx]):5.1f}%  "
+                f"instant={100.0 * float(raw_percent[idx]):5.1f}%  "
+                f"score={float(raw_scores[idx]):.3e}"
+            )
+            cv2.putText(
+                canvas, label, (bar_x0 + 8, y + 23), cv2.FONT_HERSHEY_SIMPLEX,
+                0.48, (15, 15, 15), 1, cv2.LINE_AA,
+            )
+
+        plot_x0, plot_y0, plot_x1, plot_y1 = 70, 382, 850, 548
+        cv2.rectangle(canvas, (plot_x0, plot_y0), (plot_x1, plot_y1), (35, 35, 35), 1)
+        for frac in (0.25, 0.50, 0.75):
+            y = int(round(plot_y1 - frac * (plot_y1 - plot_y0)))
+            cv2.line(canvas, (plot_x0, y), (plot_x1, y), (215, 215, 215), 1)
+            cv2.putText(
+                canvas, f"{int(frac * 100)}%", (20, y + 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (90, 90, 90), 1, cv2.LINE_AA,
+            )
+
+        hist = np.asarray(list(self._modality_importance_history), dtype=np.float32)
+        if hist.ndim == 2 and hist.shape[0] >= 2:
+            xs = np.linspace(plot_x0, plot_x1, hist.shape[0]).astype(np.int32)
+            for idx, color in enumerate(colors):
+                ys = np.rint(plot_y1 - hist[:, idx] * (plot_y1 - plot_y0)).astype(np.int32)
+                pts = np.stack([xs, ys], axis=1).reshape(-1, 1, 2)
+                cv2.polylines(canvas, [pts], False, color, 2, cv2.LINE_AA)
+
+        cv2.putText(
+            canvas, "smoothed relative sensitivity history", (plot_x0, plot_y0 - 12),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.52, (45, 45, 45), 1, cv2.LINE_AA,
+        )
+        cv2.putText(
+            canvas,
+            "Counterfactual diagnostic, not causal proof. Force removes current force + history together.",
+            (32, 582),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.46,
+            (80, 80, 80),
+            1,
+            cv2.LINE_AA,
+        )
+        return canvas
+
+    def _run_modality_importance_debug(
+        self,
+        *,
+        q_t: torch.Tensor,
+        img_t: torch.Tensor,
+        force_hist_t: Optional[torch.Tensor],
+        stain_mask_t: Optional[torch.Tensor],
+        flow_initial_noise_t: Optional[torch.Tensor],
+        gripper_position_t: Optional[torch.Tensor] = None,
+        gripper_current_t: Optional[torch.Tensor] = None,
+        gripper_history_t: Optional[torch.Tensor] = None,
+    ) -> bool:
+        if not self.modality_importance_enable or self.pub_modality_importance is None:
+            return False
+        if self._infer_plan_count <= 0:
+            return False
+        if (self._infer_plan_count % self.modality_importance_every_n_infer) != 0:
+            return False
+
+        with self._modality_importance_worker_lock:
+            if self._modality_importance_worker_busy:
+                return False
+            self._modality_importance_worker_busy = True
+
+        def _snapshot(value: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+            return None if value is None else value.detach().clone()
+
+        worker_inputs = {
+            "q_t": _snapshot(q_t),
+            "img_t": _snapshot(img_t),
+            "force_hist_t": _snapshot(force_hist_t),
+            "stain_mask_t": _snapshot(stain_mask_t),
+            "flow_initial_noise_t": _snapshot(flow_initial_noise_t),
+            "gripper_position_t": _snapshot(gripper_position_t),
+            "gripper_current_t": _snapshot(gripper_current_t),
+            "gripper_history_t": _snapshot(gripper_history_t),
+        }
+
+        def _worker() -> None:
+            try:
+                self._compute_modality_importance_debug(**worker_inputs)
+            except Exception as exc:
+                self._modality_importance_fail_count += 1
+                self.get_logger().warn(
+                    f"[MODALITY] worker failed #{self._modality_importance_fail_count}: {exc}"
+                )
+            finally:
+                with self._modality_importance_worker_lock:
+                    self._modality_importance_worker_busy = False
+
+        worker = threading.Thread(
+            target=_worker,
+            name="modality_importance_worker",
+            daemon=True,
+        )
+        self._modality_importance_worker_thread = worker
+        worker.start()
+        return True
+
+    def _compute_modality_importance_debug(
+        self,
+        *,
+        q_t: torch.Tensor,
+        img_t: torch.Tensor,
+        force_hist_t: Optional[torch.Tensor],
+        stain_mask_t: Optional[torch.Tensor],
+        flow_initial_noise_t: Optional[torch.Tensor],
+        gripper_position_t: Optional[torch.Tensor] = None,
+        gripper_current_t: Optional[torch.Tensor] = None,
+        gripper_history_t: Optional[torch.Tensor] = None,
+    ) -> bool:
+        if self.policy_class != "FLOW":
+            if self._modality_importance_fail_count == 0:
+                self.get_logger().warn(
+                    "[MODALITY] fast modality attribution currently supports FLOW only"
+                )
+            self._modality_importance_fail_count += 1
+            return False
+        if not hasattr(self.policy, "_condition") or not hasattr(self.policy, "velocity_net"):
+            self.get_logger().warn(
+                "[MODALITY] FLOW policy does not expose _condition/velocity_net"
+            )
+            return False
+
+        def _target_block(seq: torch.Tensor) -> torch.Tensor:
+            if seq.dim() != 2 or seq.shape[-1] not in (9, 10, 11):
+                raise RuntimeError(f"modality seq must be (T,D), got {tuple(seq.shape)}")
+            total_steps = int(seq.shape[0])
+            start = min(
+                max(0, int(self.modality_importance_target_step)),
+                max(0, total_steps - 1),
+            )
+            end = min(
+                total_steps,
+                start + max(1, int(self.modality_importance_target_horizon)),
+            )
+            block = seq[start:end]
+            target = str(self.modality_importance_target or "action_norm").strip().lower()
+            scalar_index = {
+                "x": 0, "cmd_x": 0,
+                "y": 1, "cmd_y": 1,
+                "z": 2, "cmd_z": 2, "abs_z": 2, "z_abs": 2,
+                "wx": 3, "rx": 3, "roll": 3,
+                "wy": 4, "ry": 4, "pitch": 4,
+                "wz": 5, "rz": 5, "yaw": 5,
+                "fx": 6, "cmd_fx": 6,
+                "fy": 7, "cmd_fy": 7,
+                "fz": 8, "cmd_fz": 8, "abs_fz": 8, "fz_abs": 8,
+                "gripper": 9, "grip": 9, "tick": 9, "gripper_position": 9,
+                "gripper_current": 10, "goal_current": 10,
+                "gripper_goal_current": 10,
+            }
+            if target in scalar_index:
+                idx = scalar_index[target]
+                if idx >= block.shape[-1]:
+                    raise RuntimeError(
+                        f"target={target} requires action dim>{idx}, got {block.shape[-1]}"
+                    )
+                return block[:, idx:idx + 1]
+            if target in ("xyz_norm", "pos_norm", "position_norm"):
+                return block[:, 0:3]
+            if target in ("rot_norm", "ori_norm", "orientation_norm"):
+                return block[:, 3:6]
+            if target in ("force_norm", "f_norm"):
+                return block[:, 6:9]
+            return block[:, 0:9]
+
+        if q_t.dim() != 2 or q_t.shape[0] != 1 or q_t.shape[-1] < 9:
+            raise RuntimeError(f"expected qpos shape (1,D>=9), got {tuple(q_t.shape)}")
+        if img_t.dim() != 5 or img_t.shape[0] != 1:
+            raise RuntimeError(f"expected image shape (1,K,3,H,W), got {tuple(img_t.shape)}")
+
+        was_training = self.policy.training
+        try:
+            self.policy.eval()
+            q_base = q_t.detach()
+            image_base = img_t.detach()
+            force_base = None if force_hist_t is None else force_hist_t.detach()
+
+            q_position_off = q_base.clone()
+            q_position_off[..., :6] = 0.0
+            q_force_off = q_base.clone()
+            q_force_off[..., 6:9] = 0.0
+            force_history_off = (
+                None if force_base is None else torch.zeros_like(force_base)
+            )
+
+            # FlowRGBPolicy applies ImageNet normalization internally. Feeding
+            # ImageNet mean RGB therefore represents a neutral zero CNN input.
+            image_off = image_base.clone()
+            image_mean = torch.tensor(
+                [0.485, 0.456, 0.406],
+                dtype=image_off.dtype,
+                device=image_off.device,
+            ).view(1, 1, 3, 1, 1)
+            image_off.copy_(image_mean.expand_as(image_off))
+
+            # Batch order: full, position-off, force-off, image-off.
+            q_batch = torch.cat(
+                [q_base, q_position_off, q_force_off, q_base], dim=0
+            )
+            image_batch = torch.cat(
+                [image_base, image_base, image_base, image_off], dim=0
+            )
+            force_batch = None
+            if force_base is not None:
+                force_batch = torch.cat(
+                    [force_base, force_base, force_history_off, force_base], dim=0
+                )
+            mask_batch = None
+            if stain_mask_t is not None:
+                mask_base = stain_mask_t.detach()
+                mask_batch = mask_base.repeat(4, *([1] * (mask_base.dim() - 1)))
+
+            gp_batch = None
+            gc_batch = None
+            gh_batch = None
+            if gripper_position_t is not None:
+                gp_batch = gripper_position_t.detach().repeat(
+                    4, *([1] * (gripper_position_t.dim() - 1))
+                )
+            if gripper_current_t is not None:
+                gc_batch = gripper_current_t.detach().repeat(
+                    4, *([1] * (gripper_current_t.dim() - 1))
+                )
+            if gripper_history_t is not None:
+                gh_batch = gripper_history_t.detach().repeat(
+                    4, *([1] * (gripper_history_t.dim() - 1))
+                )
+
+            if flow_initial_noise_t is None:
+                z_base = torch.zeros(
+                    (1, self.chunk_size, self.action_dim),
+                    dtype=q_base.dtype,
+                    device=q_base.device,
+                )
+            else:
+                z_base = flow_initial_noise_t.detach()
+            z_batch = z_base.repeat(4, 1, 1)
+            t_batch = torch.full(
+                (4,), 0.5, dtype=q_base.dtype, device=q_base.device
+            )
+
+            start_t = _monotonic()
+            with torch.inference_mode():
+                cond_batch = self.policy._condition(
+                    qpos=q_batch,
+                    image=image_batch,
+                    force_history=force_batch,
+                    gripper_position=gp_batch,
+                    gripper_current=gc_batch,
+                    gripper_history=gh_batch,
+                ) if self.use_gripper else self.policy._condition(
+                    qpos=q_batch,
+                    image=image_batch,
+                    force_history=force_batch,
+                    stain_mask=mask_batch,
+                )
+                velocity_batch = self.policy.velocity_net(
+                    sample=z_batch,
+                    t=t_batch,
+                    global_cond=cond_batch,
+                )
+            compute_ms = 1000.0 * (_monotonic() - start_t)
+
+            reference_block = _target_block(velocity_batch[0])
+            raw_scores = []
+            for idx in (1, 2, 3):
+                delta = _target_block(velocity_batch[idx]) - reference_block
+                raw_scores.append(
+                    float(torch.sqrt(torch.mean(delta.float().square()) + 1e-24).cpu())
+                )
+            raw_scores = np.asarray(raw_scores, dtype=np.float64)
+            if not np.all(np.isfinite(raw_scores)):
+                raise RuntimeError(f"non-finite modality scores: {raw_scores}")
+            total = float(raw_scores.sum())
+            if total <= 1e-20:
+                raise RuntimeError("all modality ablation changes are effectively zero")
+            raw_percent = raw_scores / total
+
+            if self._modality_importance_ema is None:
+                smooth_percent = raw_percent.copy()
+            else:
+                alpha = self.modality_importance_ema_alpha
+                smooth_percent = (
+                    alpha * self._modality_importance_ema
+                    + (1.0 - alpha) * raw_percent
+                )
+            smooth_percent = smooth_percent / max(float(smooth_percent.sum()), 1e-20)
+            self._modality_importance_ema = smooth_percent
+            self._modality_importance_history.append(smooth_percent.astype(np.float32))
+            self._modality_importance_count += 1
+
+            rgb = self._render_modality_importance_rgb(
+                raw_scores=raw_scores,
+                raw_percent=raw_percent,
+                smooth_percent=smooth_percent,
+            )
+            msg = _rgb_numpy_to_image_msg(
+                rgb,
+                stamp=self.get_clock().now().to_msg(),
+                frame_id="modality_importance",
+            )
+            self.pub_modality_importance.publish(msg)
+
+            if (
+                self._modality_importance_count <= 3
+                or self._modality_importance_count
+                % self.modality_importance_log_every_n == 0
+            ):
+                self.get_logger().info(
+                    "[MODALITY] "
+                    f"#{self._modality_importance_count} "
+                    f"target={self.modality_importance_target} "
+                    f"position={100.0 * smooth_percent[0]:.1f}% "
+                    f"force={100.0 * smooth_percent[1]:.1f}% "
+                    f"image={100.0 * smooth_percent[2]:.1f}% "
+                    f"ablation_scores="
+                    f"{np.array2string(raw_scores, precision=3, separator=',')} "
+                    f"compute={compute_ms:.1f}ms"
+                )
+            return True
+
+        except Exception as e:
+            self._modality_importance_fail_count += 1
+            now_t = _monotonic()
+            if (
+                self._modality_importance_fail_count <= 3
+                or now_t - self._modality_importance_last_log_t > 2.0
+            ):
+                self._modality_importance_last_log_t = now_t
+                self.get_logger().warn(
+                    f"[MODALITY] failed #{self._modality_importance_fail_count}: {e}"
+                )
+            return False
+        finally:
+            if was_training:
+                self.policy.train()
+
 
     # ------------------------------------------------------------
     # Load policy (nrs_imitation/source/models/policy.py) + ckpt
@@ -2953,7 +3594,9 @@ class NodeCmdMotionInfer(Node):
             self.get_logger().error(f"[INFER] image stack failed: {e}")
             return
 
+        flow_initial_noise_t = None
         try:
+            flow_initial_noise_t = self._flow_initial_noise_for_plan(q_t)
             with torch.inference_mode():
                 if self.use_gripper:
                     out = self.policy(
@@ -2964,12 +3607,24 @@ class NodeCmdMotionInfer(Node):
                         gripper_current=gripper_current_t,
                         gripper_history=gripper_history_t,
                     )
+                elif self.policy_class == "FLOW" and hasattr(self.policy, "sample_action"):
+                    out = self.policy.sample_action(
+                        qpos=q_t,
+                        image=img_t,
+                        force_history=force_hist_t if self.use_force_history else None,
+                        stain_mask=stain_mask_t,
+                        num_steps=self.flow_infer_steps,
+                        initial_noise=flow_initial_noise_t,
+                    )
                 elif self.use_force_history:
                     out = self.policy(q_t, img_t, force_history=force_hist_t, stain_mask=stain_mask_t)
                 else:
                     out = self.policy(q_t, img_t, stain_mask=stain_mask_t)
 
-            seq = _fix_policy_output_seq(out, self.chunk_size, self.policy_class, action_dim=self.action_dim)
+            seq_model = _fix_policy_output_seq(
+                out, self.chunk_size, self.policy_class, action_dim=self.action_dim
+            )
+            seq = seq_model
 
             if self.denorm_action_enabled and self.stats is not None:
                 seq = _denorm_action_seq(seq, self.stats)
@@ -2991,7 +3646,18 @@ class NodeCmdMotionInfer(Node):
             self.get_logger().error(f"[INFER] policy forward failed: {e}")
             return
 
-        self.plans.append(Plan(t0=_monotonic(), seq_den=seq_den))
+        local_anchor_applied = False
+        if self.action_selection_mode == "trajectory_interp" and self.action_type == "absolute":
+            # Receding-horizon local anchoring: every newly generated FLOW
+            # trajectory starts at the measured EE pose, while preserving all
+            # learned relative motion over its 128-step training time axis.
+            local_offset6 = pose6[:6].astype(np.float32) - seq_den[0, :6]
+            seq_den[:, :6] = seq_den[:, :6] + local_offset6[None, :]
+            local_anchor_applied = True
+
+        self.plans.append(
+            Plan(t0=_monotonic(), seq_den=seq_den, local_anchor_applied=local_anchor_applied)
+        )
         self._infer_plan_count += 1
 
         # Optional Grad-CAM debug visualization. This performs a separate backward pass
@@ -3002,6 +3668,19 @@ class NodeCmdMotionInfer(Node):
             img_t=img_t,
             force_hist_t=force_hist_t,
             stain_mask_t=stain_mask_t,
+            flow_initial_noise_t=flow_initial_noise_t,
+            gripper_position_t=gripper_position_t,
+            gripper_current_t=gripper_current_t,
+            gripper_history_t=gripper_history_t,
+        )
+        # Standalone position/force/image attribution dashboard. This uses one
+        # low-rate batched FLOW velocity probe and never changes the generated plan.
+        self._run_modality_importance_debug(
+            q_t=q_t,
+            img_t=img_t,
+            force_hist_t=force_hist_t,
+            stain_mask_t=stain_mask_t,
+            flow_initial_noise_t=flow_initial_noise_t,
             gripper_position_t=gripper_position_t,
             gripper_current_t=gripper_current_t,
             gripper_history_t=gripper_history_t,
@@ -3023,6 +3702,23 @@ class NodeCmdMotionInfer(Node):
     # ------------------------------------------------------------
     # Temporal aggregation
     # ------------------------------------------------------------
+    def _trajectory_interp_cmd(self, now_t: float) -> Optional[np.ndarray]:
+        """Linearly replay the newest plan on the dataset/training time axis."""
+        if not self.plans:
+            return None
+        plan = self.plans[-1]
+        seq = plan.seq_den
+        if seq.shape[0] == 0:
+            return None
+
+        sample_pos = max(0.0, (now_t - plan.t0) * self.trajectory_hz + float(self.pred_step_offset))
+        lo = int(math.floor(sample_pos))
+        if lo >= seq.shape[0] - 1:
+            return seq[-1].astype(np.float32).copy()
+        hi = lo + 1
+        alpha = float(sample_pos - lo)
+        return ((1.0 - alpha) * seq[lo] + alpha * seq[hi]).astype(np.float32)
+
     def _temporal_agg_cmd(self, now_t: float) -> Optional[np.ndarray]:
         if not self.plans:
             return None
@@ -3089,8 +3785,13 @@ class NodeCmdMotionInfer(Node):
 
         if self.cmd_safety_enable:
             reason = ""
+            start_envelope_violation = False
+            start_delta = np.zeros(3, dtype=np.float32)
+            start_xy_radius = 0.0
             pose6 = self._current_pose6_snapshot()
-            if not np.all(np.isfinite(cmd)):
+            if self._cmd_safety_latched:
+                reason = f"latched start-envelope violation: {self._cmd_safety_latch_reason}"
+            elif not np.all(np.isfinite(cmd)):
                 reason = "non-finite command"
             elif (
                 pose6 is not None
@@ -3103,6 +3804,26 @@ class NodeCmdMotionInfer(Node):
                         f"xyz target {dist:.3f}mm from current pose "
                         f"(limit={self.cmd_safety_max_xyz_from_current_mm:.3f}mm)"
                     )
+
+            # Apply this only after optional demo-start alignment. At that point
+            # _start_pose6 is the policy execution start pose, not the pre-align pose.
+            if (
+                not reason
+                and self._demo_start_align_done
+                and self._start_pose6 is not None
+                and np.all(np.isfinite(self._start_pose6[:3]))
+            ):
+                reason, start_delta, start_xy_radius = _start_pose_envelope_violation(
+                    cmd[0:3],
+                    self._start_pose6[0:3],
+                    max_xy_mm=self.cmd_safety_max_xy_from_start_mm,
+                    max_z_down_mm=self.cmd_safety_max_z_down_from_start_mm,
+                    max_z_up_mm=self.cmd_safety_max_z_up_from_start_mm,
+                )
+                start_envelope_violation = bool(reason)
+                if start_envelope_violation and self.cmd_safety_latch_on_start_limit:
+                    self._cmd_safety_latched = True
+                    self._cmd_safety_latch_reason = reason
 
             if reason:
                 if pose6 is not None and np.all(np.isfinite(pose6[:6])):
@@ -3119,7 +3840,11 @@ class NodeCmdMotionInfer(Node):
                     self._cmd_safety_last_log = now
                     self.get_logger().error(
                         "[CMD-SAFETY] blocked unsafe command: "
-                        f"{reason}. Publishing current-pose hold/previous safe command."
+                        f"{reason}. "
+                        f"start_delta_xyz=[{start_delta[0]:.3f},{start_delta[1]:.3f},{start_delta[2]:.3f}]mm "
+                        f"start_xy_radius={start_xy_radius:.3f}mm "
+                        f"latched={int(self._cmd_safety_latched)}. "
+                        "Publishing current-pose hold/previous safe command."
                     )
 
         m = Float64MultiArray()
@@ -3669,7 +4394,10 @@ class NodeCmdMotionInfer(Node):
                     self._enter_track()
 
         else:
-            cmd_pred_full = self._temporal_agg_cmd(now_t)
+            if self.action_selection_mode == "trajectory_interp":
+                cmd_pred_full = self._trajectory_interp_cmd(now_t)
+            else:
+                cmd_pred_full = self._temporal_agg_cmd(now_t)
 
             if cmd_pred_full is None:
                 now_dbg = _monotonic()
@@ -3697,12 +4425,13 @@ class NodeCmdMotionInfer(Node):
             if self.action_type == "delta":
                 cmd_target = (self.prev_cmd + cmd_target).astype(np.float32)
 
-            if not self._anchor_ready:
-                self._anchor_offset6 = (pose6.astype(np.float32) - cmd_target[0:6]).astype(np.float32)
-                self._anchor_ready = True
-                self.get_logger().info("[ANCHOR] initialized")
+            if self.action_selection_mode != "trajectory_interp":
+                if not self._anchor_ready:
+                    self._anchor_offset6 = (pose6.astype(np.float32) - cmd_target[0:6]).astype(np.float32)
+                    self._anchor_ready = True
+                    self.get_logger().info("[ANCHOR] initialized")
 
-            cmd_target[0:6] = (cmd_target[0:6] + self._anchor_offset6).astype(np.float32)
+                cmd_target[0:6] = (cmd_target[0:6] + self._anchor_offset6).astype(np.float32)
 
             if self.stage == Stage.APPROACH:
                 cmd_target[6] = 0.0

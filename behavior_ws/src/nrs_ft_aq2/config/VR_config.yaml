@@ -35,6 +35,13 @@ ft_aq:
     gravity_compensation_apply_handle: false
     gravity_compensation_apply_contact: true
     gravity_compensation_axis_sign: [-1.0, 1.0, 1.0]
+    # torque is an axial vector; an x-axis reflection maps it as [1, -1, -1]
+    gravity_compensation_moment_axis_sign: [1.0, -1.0, -1.0]
+    gravity_calibration_file: "behavior_ws/src/nrs_ft_aq2/config/spindle_gravity.yaml"
+    # payload/TCP axes -> teaching FT published axes
+    tracker_to_sensor_rpy: [0.0, 0.0, 0.0]
+    # vector from teaching FT origin to the robot-calibration origin, in teaching FT axes [m]
+    gravity_payload_origin_in_sensor_xyz: [0.0, 0.0, 0.0]
 
     # Filter Switch
     Hmov_switch: false

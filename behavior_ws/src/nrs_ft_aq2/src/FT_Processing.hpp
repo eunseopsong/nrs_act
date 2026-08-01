@@ -46,6 +46,7 @@ public:
 private:
     using Vec3 = std::array<double, 3>;
     using Mat3 = std::array<std::array<double, 3>, 3>;
+    using Mat63 = std::array<std::array<double, 3>, 6>;
 
     void configureGravityCompensation();
     void calibratedPoseCB(const std_msgs::msg::Float64MultiArray::ConstSharedPtr msg);
@@ -71,23 +72,22 @@ private:
     bool gravity_apply_contact_ = true;
     bool gravity_reference_set_ = false;
     bool missing_pose_warned_ = false;
-    double tool_mass_ = 0.0;
-    Vec3 tool_cog_ = {0.0, 0.0, 0.0};
-    Vec3 gravity_sensor_init_ = {0.0, 0.0, 0.0};
+    bool gravity_matrix_loaded_ = false;
+    Mat63 gravity_matrix_{};
+    Vec3 gravity_payload_init_ = {0.0, 0.0, 0.0};
     Vec3 gravity_compensation_axis_sign_ = {-1.0, 1.0, 1.0};
+    Vec3 gravity_compensation_moment_axis_sign_ = {1.0, -1.0, -1.0};
     Mat3 latest_world_to_tracker_rot_ = {{{1.0, 0.0, 0.0},
                                           {0.0, 1.0, 0.0},
                                           {0.0, 0.0, 1.0}}};
     Mat3 tracker_to_sensor_rot_ = {{{1.0, 0.0, 0.0},
                                     {0.0, 1.0, 0.0},
                                     {0.0, 0.0, 1.0}}};
+    Vec3 gravity_payload_origin_in_sensor_xyz_ = {0.0, 0.0, 0.0};
     bool has_calibrated_pose_ = false;
     std::mutex pose_mutex_;
     std::string calibrated_pose_topic_;
-    std::string tool_param_source_;
-    std::string tool_stl_path_;
-    double tool_stl_volume_m3_ = 0.0;
-    Vec3 tool_stl_centroid_m_ = {0.0, 0.0, 0.0};
+    std::string gravity_calibration_file_;
 
     rclcpp::Publisher<geometry_msgs::msg::Wrench>::SharedPtr ftsensor_pub_;
     rclcpp::Publisher<geometry_msgs::msg::Wrench>::SharedPtr Cftsensor_pub_;

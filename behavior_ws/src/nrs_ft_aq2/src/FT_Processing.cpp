@@ -1,12 +1,7 @@
 #include "FT_Processing.hpp"
 #include <cstdlib>
 #include <array>
-#include <cstdint>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
-
-#include "ament_index_cpp/get_package_share_directory.hpp"
+#include <yaml-cpp/yaml.h>
 
 namespace {
 std::string expand_repo_path(const std::string& path) {
@@ -39,13 +34,6 @@ namespace
 using Vec3 = std::array<double, 3>;
 using Mat3 = std::array<std::array<double, 3>, 3>;
 
-struct StlMassProperties
-{
-  double volume_m3 = 0.0;
-  Vec3 centroid_m = {0.0, 0.0, 0.0};
-  std::uint32_t triangle_count = 0;
-};
-
 // FT 데이터 공유 보호용 (단일 노드 전제)
 std::mutex g_ft_mtx;
 
@@ -55,52 +43,6 @@ inline double clamp_positive(double v, double fallback)
   return (std::isfinite(v) && v > 1e-9) ? v : fallback;
 }
 
-std::string expand_home_path(const std::string& path)
-{
-  if (path.rfind("~/", 0) != 0) {
-    return path;
-  }
-
-  const char* home = std::getenv("HOME");
-  if (home == nullptr || std::string(home).empty()) {
-    return path;
-  }
-  return std::string(home) + path.substr(1);
-}
-
-std::string resolve_package_relative_path(const std::string& raw_path)
-{
-  const std::string expanded_path = expand_home_path(raw_path);
-  if (expanded_path.empty()) {
-    return expanded_path;
-  }
-
-  const std::filesystem::path path(expanded_path);
-  if (path.is_absolute()) {
-    return expanded_path;
-  }
-
-  try {
-    const std::filesystem::path share_dir =
-      ament_index_cpp::get_package_share_directory("nrs_ft_aq2");
-    const std::filesystem::path package_relative = share_dir / path;
-    if (std::filesystem::exists(package_relative)) {
-      return package_relative.string();
-    }
-
-    if (!path.has_parent_path()) {
-      const std::filesystem::path mesh_relative = share_dir / "mesh" / path;
-      if (std::filesystem::exists(mesh_relative)) {
-        return mesh_relative.string();
-      }
-    }
-
-    return package_relative.string();
-  } catch (const std::exception&) {
-    return expanded_path;
-  }
-}
-
 Vec3 cross_vec(const Vec3& a, const Vec3& b)
 {
   return {
@@ -108,195 +50,6 @@ Vec3 cross_vec(const Vec3& a, const Vec3& b)
     a[2] * b[0] - a[0] * b[2],
     a[0] * b[1] - a[1] * b[0]
   };
-}
-
-double dot_vec(const Vec3& a, const Vec3& b)
-{
-  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-void accumulate_triangle(const Vec3& a,
-                         const Vec3& b,
-                         const Vec3& c,
-                         double& signed_volume,
-                         Vec3& centroid_moment)
-{
-  const double volume = dot_vec(a, cross_vec(b, c)) / 6.0;
-  signed_volume += volume;
-
-  for (int i = 0; i < 3; ++i) {
-    centroid_moment[i] += volume * (a[i] + b[i] + c[i]) / 4.0;
-  }
-}
-
-float read_float_le(const char* data)
-{
-  float value = 0.0f;
-  std::memcpy(&value, data, sizeof(float));
-  return value;
-}
-
-bool read_binary_stl_mass_properties(const std::string& path,
-                                     double unit_scale,
-                                     std::uint32_t triangle_count,
-                                     StlMassProperties& props,
-                                     std::string& error_msg)
-{
-  std::ifstream ifs(path, std::ios::binary);
-  if (!ifs) {
-    error_msg = "failed to open binary STL";
-    return false;
-  }
-
-  ifs.seekg(84, std::ios::beg);
-
-  double signed_volume = 0.0;
-  Vec3 centroid_moment = {0.0, 0.0, 0.0};
-
-  for (std::uint32_t tri = 0; tri < triangle_count; ++tri) {
-    char record[50];
-    if (!ifs.read(record, sizeof(record))) {
-      error_msg = "unexpected EOF while reading binary STL triangles";
-      return false;
-    }
-
-    Vec3 vertices[3];
-    for (int v = 0; v < 3; ++v) {
-      const int offset = 12 + v * 12;
-      vertices[v] = {
-        static_cast<double>(read_float_le(record + offset + 0)) * unit_scale,
-        static_cast<double>(read_float_le(record + offset + 4)) * unit_scale,
-        static_cast<double>(read_float_le(record + offset + 8)) * unit_scale
-      };
-    }
-
-    accumulate_triangle(vertices[0], vertices[1], vertices[2],
-                        signed_volume, centroid_moment);
-  }
-
-  if (std::abs(signed_volume) < 1e-15) {
-    error_msg = "STL signed volume is too small; mesh may be open or invalid";
-    return false;
-  }
-
-  props.volume_m3 = std::abs(signed_volume);
-  for (int i = 0; i < 3; ++i) {
-    props.centroid_m[i] = centroid_moment[i] / signed_volume;
-  }
-  props.triangle_count = triangle_count;
-  return true;
-}
-
-bool read_ascii_stl_mass_properties(const std::string& path,
-                                    double unit_scale,
-                                    StlMassProperties& props,
-                                    std::string& error_msg)
-{
-  std::ifstream ifs(path);
-  if (!ifs) {
-    error_msg = "failed to open ASCII STL";
-    return false;
-  }
-
-  double signed_volume = 0.0;
-  Vec3 centroid_moment = {0.0, 0.0, 0.0};
-  Vec3 tri_vertices[3];
-  int vertex_idx = 0;
-  std::uint32_t triangle_count = 0;
-
-  std::string token;
-  while (ifs >> token) {
-    if (token != "vertex") {
-      continue;
-    }
-
-    double x = 0.0;
-    double y = 0.0;
-    double z = 0.0;
-    if (!(ifs >> x >> y >> z)) {
-      error_msg = "failed to parse ASCII STL vertex";
-      return false;
-    }
-
-    tri_vertices[vertex_idx] = {
-      x * unit_scale,
-      y * unit_scale,
-      z * unit_scale
-    };
-    ++vertex_idx;
-
-    if (vertex_idx == 3) {
-      accumulate_triangle(tri_vertices[0], tri_vertices[1], tri_vertices[2],
-                          signed_volume, centroid_moment);
-      vertex_idx = 0;
-      ++triangle_count;
-    }
-  }
-
-  if (triangle_count == 0) {
-    error_msg = "no triangles found in ASCII STL";
-    return false;
-  }
-  if (std::abs(signed_volume) < 1e-15) {
-    error_msg = "STL signed volume is too small; mesh may be open or invalid";
-    return false;
-  }
-
-  props.volume_m3 = std::abs(signed_volume);
-  for (int i = 0; i < 3; ++i) {
-    props.centroid_m[i] = centroid_moment[i] / signed_volume;
-  }
-  props.triangle_count = triangle_count;
-  return true;
-}
-
-bool read_stl_mass_properties(const std::string& raw_path,
-                              double unit_scale,
-                              StlMassProperties& props,
-                              std::string& error_msg)
-{
-  if (unit_scale <= 0.0 || !std::isfinite(unit_scale)) {
-    error_msg = "stl_unit_scale must be positive";
-    return false;
-  }
-
-  const std::string path = expand_home_path(raw_path);
-  std::ifstream probe(path, std::ios::binary | std::ios::ate);
-  if (!probe) {
-    error_msg = "failed to open STL path: " + path;
-    return false;
-  }
-
-  const auto file_size_pos = probe.tellg();
-  if (file_size_pos == std::ifstream::pos_type(-1)) {
-    error_msg = "failed to determine STL file size: " + path;
-    return false;
-  }
-
-  const auto file_size = static_cast<std::uintmax_t>(
-    static_cast<std::streamoff>(file_size_pos));
-  if (file_size < 84) {
-    probe.close();
-    return read_ascii_stl_mass_properties(path, unit_scale, props, error_msg);
-  }
-
-  probe.seekg(80, std::ios::beg);
-  std::uint32_t triangle_count = 0;
-  if (!probe.read(reinterpret_cast<char*>(&triangle_count), sizeof(triangle_count))) {
-    error_msg = "failed to read binary STL triangle count";
-    return false;
-  }
-  probe.close();
-
-  const std::uintmax_t expected_binary_size =
-    84ull + static_cast<std::uintmax_t>(triangle_count) * 50ull;
-
-  if (expected_binary_size == file_size && triangle_count > 0) {
-    return read_binary_stl_mass_properties(path, unit_scale, triangle_count,
-                                           props, error_msg);
-  }
-
-  return read_ascii_stl_mass_properties(path, unit_scale, props, error_msg);
 }
 
 Mat3 identity_matrix()
@@ -361,7 +114,7 @@ Mat3 rpy_to_matrix(const Vec3& rpy)
 
 Mat3 axis_angle_to_matrix(const Vec3& w)
 {
-  const double theta = std::sqrt(dot_vec(w, w));
+  const double theta = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
   if (theta < 1e-8) {
     return identity_matrix();
   }
@@ -382,17 +135,6 @@ Mat3 axis_angle_to_matrix(const Vec3& w)
   return result;
 }
 
-Vec3 transform_point(const Vec3& point, const Vec3& translation, const Vec3& rpy)
-{
-  const Mat3 R = rpy_to_matrix(rpy);
-  Vec3 transformed = translation;
-  for (int i = 0; i < 3; ++i) {
-    for (int k = 0; k < 3; ++k) {
-      transformed[i] += R[i][k] * point[k];
-    }
-  }
-  return transformed;
-}
 } // namespace
 
 FT_processing::FT_processing(std::shared_ptr<rclcpp::Node> node,
@@ -534,46 +276,23 @@ void FT_processing::configureGravityCompensation()
   calibrated_pose_topic_ = "/calibrated_pose";
   (void)node_->get_parameter("calibrated_pose_topic", calibrated_pose_topic_);
 
-  double manual_mass = 0.0;
-  (void)node_->get_parameter("tool_mass", manual_mass);
-  tool_mass_ = manual_mass;
-
-  std::vector<double> manual_cog = {0.0, 0.0, 0.0};
-  (void)node_->get_parameter("tool_cog", manual_cog);
-  if (manual_cog.size() == 3) {
-    tool_cog_ = {manual_cog[0], manual_cog[1], manual_cog[2]};
-  } else {
-    RCLCPP_WARN(node_->get_logger(),
-                "tool_cog must have exactly 3 elements. Using [0, 0, 0].");
-    tool_cog_ = {0.0, 0.0, 0.0};
-  }
-  tool_param_source_ = "manual parameters";
-
-  std::string raw_stl_path = "mesh/tcp_under_polishing.stl";
-  (void)node_->get_parameter("tool_stl_path", raw_stl_path);
-  tool_stl_path_ = resolve_package_relative_path(raw_stl_path);
-
-  double stl_unit_scale = 0.001;  // mm -> m default
-  (void)node_->get_parameter("stl_unit_scale", stl_unit_scale);
-
-  double tool_density = 1240.0;  // PLA [kg/m^3]
-  (void)node_->get_parameter("tool_density", tool_density);
-
-  double tool_mass_override = 0.0;
-  (void)node_->get_parameter("tool_mass_override", tool_mass_override);
-
-  std::vector<double> stl_to_sensor_xyz_param = {0.0, 0.0, 0.0};
-  std::vector<double> stl_to_sensor_rpy_param = {0.0, 0.0, 0.0};
   std::vector<double> tracker_to_sensor_rpy_param = {0.0, 0.0, 0.0};
+  std::vector<double> payload_origin_param = {0.0, 0.0, 0.0};
   std::vector<double> gravity_axis_sign_param = {
     gravity_compensation_axis_sign_[0],
     gravity_compensation_axis_sign_[1],
     gravity_compensation_axis_sign_[2]
   };
-  (void)node_->get_parameter("stl_to_sensor_xyz", stl_to_sensor_xyz_param);
-  (void)node_->get_parameter("stl_to_sensor_rpy", stl_to_sensor_rpy_param);
+  std::vector<double> gravity_moment_axis_sign_param = {
+    gravity_compensation_moment_axis_sign_[0],
+    gravity_compensation_moment_axis_sign_[1],
+    gravity_compensation_moment_axis_sign_[2]
+  };
   (void)node_->get_parameter("tracker_to_sensor_rpy", tracker_to_sensor_rpy_param);
+  (void)node_->get_parameter("gravity_payload_origin_in_sensor_xyz", payload_origin_param);
   (void)node_->get_parameter("gravity_compensation_axis_sign", gravity_axis_sign_param);
+  (void)node_->get_parameter(
+    "gravity_compensation_moment_axis_sign", gravity_moment_axis_sign_param);
 
   const auto vector_to_vec3 = [this](const std::vector<double>& value,
                                      const Vec3& fallback,
@@ -586,55 +305,52 @@ void FT_processing::configureGravityCompensation()
     return {value[0], value[1], value[2]};
   };
 
-  const Vec3 stl_to_sensor_xyz =
-    vector_to_vec3(stl_to_sensor_xyz_param, {0.0, 0.0, 0.0}, "stl_to_sensor_xyz");
-  const Vec3 stl_to_sensor_rpy =
-    vector_to_vec3(stl_to_sensor_rpy_param, {0.0, 0.0, 0.0}, "stl_to_sensor_rpy");
   const Vec3 tracker_to_sensor_rpy =
     vector_to_vec3(tracker_to_sensor_rpy_param, {0.0, 0.0, 0.0}, "tracker_to_sensor_rpy");
+  gravity_payload_origin_in_sensor_xyz_ =
+    vector_to_vec3(payload_origin_param, {0.0, 0.0, 0.0},
+                   "gravity_payload_origin_in_sensor_xyz");
   gravity_compensation_axis_sign_ =
     vector_to_vec3(gravity_axis_sign_param, {-1.0, 1.0, 1.0}, "gravity_compensation_axis_sign");
+  gravity_compensation_moment_axis_sign_ = vector_to_vec3(
+    gravity_moment_axis_sign_param, {1.0, -1.0, -1.0},
+    "gravity_compensation_moment_axis_sign");
 
   tracker_to_sensor_rot_ = rpy_to_matrix(tracker_to_sensor_rpy);
 
-  tool_stl_volume_m3_ = 0.0;
-  tool_stl_centroid_m_ = {0.0, 0.0, 0.0};
-  if (!tool_stl_path_.empty()) {
-    StlMassProperties props;
-    std::string error_msg;
-    if (read_stl_mass_properties(tool_stl_path_, stl_unit_scale, props, error_msg)) {
-      tool_stl_volume_m3_ = props.volume_m3;
-      tool_stl_centroid_m_ = props.centroid_m;
-      tool_cog_ = transform_point(props.centroid_m, stl_to_sensor_xyz, stl_to_sensor_rpy);
+  gravity_calibration_file_ =
+    "behavior_ws/src/nrs_ft_aq2/config/spindle_gravity.yaml";
+  (void)node_->get_parameter("gravity_calibration_file", gravity_calibration_file_);
+  gravity_calibration_file_ = expand_repo_path(gravity_calibration_file_);
 
-      if (tool_mass_override > 0.0 && std::isfinite(tool_mass_override)) {
-        tool_mass_ = tool_mass_override;
-        tool_param_source_ = "STL CoM + tool_mass_override";
-      } else if (tool_density > 0.0 && std::isfinite(tool_density)) {
-        tool_mass_ = tool_density * props.volume_m3;
-        tool_param_source_ = "STL CoM + density*volume";
-      } else {
-        tool_param_source_ = "STL CoM + manual tool_mass";
-        RCLCPP_WARN(node_->get_logger(),
-                    "tool_density is not positive and tool_mass_override is not set. "
-                    "Using tool_mass for mass.");
-      }
-
-      RCLCPP_INFO(node_->get_logger(),
-                  "Loaded STL mass properties: path=%s, triangles=%u, volume=%.9e [m^3], "
-                  "centroid_stl=[%.6f, %.6f, %.6f] [m]",
-                  tool_stl_path_.c_str(),
-                  props.triangle_count,
-                  props.volume_m3,
-                  props.centroid_m[0],
-                  props.centroid_m[1],
-                  props.centroid_m[2]);
-    } else {
+  gravity_matrix_loaded_ = false;
+  try {
+    const YAML::Node root = YAML::LoadFile(gravity_calibration_file_);
+    if (!root["enabled"] || !root["enabled"].as<bool>()) {
       RCLCPP_WARN(node_->get_logger(),
-                  "Failed to load tool_stl_path='%s': %s. Using manual tool_mass/tool_cog.",
-                  tool_stl_path_.c_str(),
-                  error_msg.c_str());
+                  "Spindle gravity calibration is disabled in %s.",
+                  gravity_calibration_file_.c_str());
+    } else if (!root["matrix_6x3"] || root["matrix_6x3"].size() != 6) {
+      throw std::runtime_error("matrix_6x3 must contain 6 rows");
+    } else {
+      for (size_t r = 0; r < 6; ++r) {
+        const YAML::Node row = root["matrix_6x3"][r];
+        if (!row.IsSequence() || row.size() != 3) {
+          throw std::runtime_error("each matrix_6x3 row must contain 3 values");
+        }
+        for (size_t c = 0; c < 3; ++c) {
+          gravity_matrix_[r][c] = row[c].as<double>();
+          if (!std::isfinite(gravity_matrix_[r][c])) {
+            throw std::runtime_error("matrix_6x3 contains a non-finite value");
+          }
+        }
+      }
+      gravity_matrix_loaded_ = true;
     }
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(node_->get_logger(),
+                 "Failed to load spindle gravity YAML '%s': %s",
+                 gravity_calibration_file_.c_str(), e.what());
   }
 
   calibrated_pose_sub_ =
@@ -644,21 +360,25 @@ void FT_processing::configureGravityCompensation()
       std::bind(&FT_processing::calibratedPoseCB, this, std::placeholders::_1));
 
   RCLCPP_INFO(node_->get_logger(),
-              "Gravity compensation: enabled=%s, apply_handle=%s, apply_contact=%s, "
-              "pose_topic=%s, source=%s, mass=%.6f [kg], cog_sensor=[%.6f, %.6f, %.6f] [m], "
-              "axis_sign=[%.1f, %.1f, %.1f]",
+              "Gravity compensation: requested=%s, matrix_loaded=%s, apply_handle=%s, "
+              "apply_contact=%s, pose_topic=%s, yaml=%s, payload_origin_sensor="
+              "[%.6f, %.6f, %.6f] [m], force_sign=[%.1f, %.1f, %.1f], "
+              "moment_sign=[%.1f, %.1f, %.1f]",
               gravity_compensation_enabled_ ? "true" : "false",
+              gravity_matrix_loaded_ ? "true" : "false",
               gravity_apply_handle_ ? "true" : "false",
               gravity_apply_contact_ ? "true" : "false",
               calibrated_pose_topic_.c_str(),
-              tool_param_source_.c_str(),
-              tool_mass_,
-              tool_cog_[0],
-              tool_cog_[1],
-              tool_cog_[2],
+              gravity_calibration_file_.c_str(),
+              gravity_payload_origin_in_sensor_xyz_[0],
+              gravity_payload_origin_in_sensor_xyz_[1],
+              gravity_payload_origin_in_sensor_xyz_[2],
               gravity_compensation_axis_sign_[0],
               gravity_compensation_axis_sign_[1],
-              gravity_compensation_axis_sign_[2]);
+              gravity_compensation_axis_sign_[2],
+              gravity_compensation_moment_axis_sign_[0],
+              gravity_compensation_moment_axis_sign_[1],
+              gravity_compensation_moment_axis_sign_[2]);
 }
 
 void FT_processing::calibratedPoseCB(const std_msgs::msg::Float64MultiArray::ConstSharedPtr msg)
@@ -685,7 +405,7 @@ void FT_processing::resetGravityReference()
 
 void FT_processing::applyGravityCompensation(double force[3], double moment[3])
 {
-  if (!gravity_compensation_enabled_ || tool_mass_ <= 0.0) {
+  if (!gravity_compensation_enabled_ || !gravity_matrix_loaded_) {
     return;
   }
 
@@ -707,26 +427,41 @@ void FT_processing::applyGravityCompensation(double force[3], double moment[3])
   const Vec3 gravity_world = {0.0, 0.0, -9.81};
   const Vec3 gravity_tracker =
     multiply_matrix_transpose_vector(world_to_tracker, gravity_world);
-  const Vec3 gravity_sensor =
-    multiply_matrix_vector(tracker_to_sensor_rot_, gravity_tracker);
-
   if (!gravity_reference_set_) {
-    gravity_sensor_init_ = gravity_sensor;
+    gravity_payload_init_ = gravity_tracker;
     gravity_reference_set_ = true;
   }
 
-  Vec3 gravity_force = {0.0, 0.0, 0.0};
-  for (int i = 0; i < 3; ++i) {
-    // Match the pose-derived gravity vector to the published FT axis signs.
-    gravity_force[i] =
-      gravity_compensation_axis_sign_[i] * tool_mass_ *
-      (gravity_sensor[i] - gravity_sensor_init_[i]);
+  Vec3 delta_g_payload = {0.0, 0.0, 0.0};
+  for (size_t i = 0; i < 3; ++i) {
+    delta_g_payload[i] = gravity_tracker[i] - gravity_payload_init_[i];
   }
 
-  const Vec3 gravity_moment = cross_vec(tool_cog_, gravity_force);
-  for (int i = 0; i < 3; ++i) {
-    force[i] -= gravity_force[i];
-    moment[i] -= gravity_moment[i];
+  Vec3 gravity_force_payload = {0.0, 0.0, 0.0};
+  Vec3 gravity_moment_payload = {0.0, 0.0, 0.0};
+  for (size_t r = 0; r < 6; ++r) {
+    double value = 0.0;
+    for (size_t c = 0; c < 3; ++c) {
+      value += gravity_matrix_[r][c] * delta_g_payload[c];
+    }
+    if (r < 3) gravity_force_payload[r] = value;
+    else gravity_moment_payload[r - 3] = value;
+  }
+
+  Vec3 gravity_force_sensor =
+    multiply_matrix_vector(tracker_to_sensor_rot_, gravity_force_payload);
+  Vec3 gravity_moment_sensor =
+    multiply_matrix_vector(tracker_to_sensor_rot_, gravity_moment_payload);
+
+  // Shift the calibrated payload-origin moment to the teaching FT origin.
+  const Vec3 origin_shift_moment =
+    cross_vec(gravity_payload_origin_in_sensor_xyz_, gravity_force_sensor);
+  for (size_t i = 0; i < 3; ++i) {
+    gravity_moment_sensor[i] += origin_shift_moment[i];
+    gravity_force_sensor[i] *= gravity_compensation_axis_sign_[i];
+    gravity_moment_sensor[i] *= gravity_compensation_moment_axis_sign_[i];
+    force[i] -= gravity_force_sensor[i];
+    moment[i] -= gravity_moment_sensor[i];
   }
 }
 

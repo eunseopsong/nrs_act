@@ -551,10 +551,19 @@ class FlowRGBPolicy(nn.Module):
         marker: Optional[torch.Tensor] = None,
         stain_mask: Optional[torch.Tensor] = None,
         num_steps: Optional[int] = None,
+        initial_noise: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         steps = max(1, int(num_steps or self.flow_infer_steps))
         B = qpos.shape[0]
-        z = torch.randn(B, self.num_queries, self.action_dim, device=qpos.device, dtype=qpos.dtype)
+        expected_shape = (B, self.num_queries, self.action_dim)
+        if initial_noise is None:
+            z = torch.randn(expected_shape, device=qpos.device, dtype=qpos.dtype)
+        else:
+            if tuple(initial_noise.shape) != expected_shape:
+                raise RuntimeError(
+                    f"initial_noise must have shape {expected_shape}, got {tuple(initial_noise.shape)}"
+                )
+            z = initial_noise.to(device=qpos.device, dtype=qpos.dtype).clone()
         dt = 1.0 / float(steps)
         for k in range(steps):
             t = torch.full((B,), (k + 0.5) / float(steps), device=qpos.device, dtype=qpos.dtype)
@@ -571,6 +580,7 @@ class FlowRGBPolicy(nn.Module):
         marker: Optional[torch.Tensor] = None,
         stain_mask: Optional[torch.Tensor] = None,
         num_steps: Optional[int] = None,
+        initial_noise: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self._sample_action_impl(
             qpos=qpos,
@@ -579,6 +589,7 @@ class FlowRGBPolicy(nn.Module):
             marker=marker,
             stain_mask=stain_mask,
             num_steps=num_steps,
+            initial_noise=initial_noise,
         )
 
     def sample_action_with_grad(
@@ -589,6 +600,7 @@ class FlowRGBPolicy(nn.Module):
         marker: Optional[torch.Tensor] = None,
         stain_mask: Optional[torch.Tensor] = None,
         num_steps: Optional[int] = None,
+        initial_noise: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self._sample_action_impl(
             qpos=qpos,
@@ -597,6 +609,7 @@ class FlowRGBPolicy(nn.Module):
             marker=marker,
             stain_mask=stain_mask,
             num_steps=num_steps,
+            initial_noise=initial_noise,
         )
 
 

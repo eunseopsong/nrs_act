@@ -4,6 +4,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/wrench_stamped.hpp>
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
 #include <yaml-cpp/yaml.h>
@@ -228,7 +229,7 @@ public:
       ament_index_cpp::get_package_share_directory("vive_tracker_ros2");
     const std::string txt_dir = vr_calibration_share + "/txt";
 
-    waypoint_file_ = txt_dir + "/for_vr_calibration_point_v6.txt";
+    waypoint_file_ = txt_dir + "/for_vr_calibration_point_v7.txt";
     ee_path_ = txt_dir + "/ur10_ee.txt";
     vr_path_ = txt_dir + "/ur10_vr.txt";
     const char* home_env = std::getenv("HOME");
@@ -238,6 +239,8 @@ public:
     calib_yaml_path_ = std::filesystem::exists(vive_tracker_src_yaml)
       ? vive_tracker_src_yaml
       : vive_tracker_share + "/yaml/calibration_matrix.yaml";
+    gravity_yaml_path_ = std::string(home_env ? home_env : "") +
+      "/nrs_imitation/behavior_ws/src/nrs_ft_aq2/config/spindle_gravity.yaml";
 
     // ----------------------------
     // Tunables
@@ -300,6 +303,24 @@ public:
     this->declare_parameter<int>("handeye_outlier_min_samples", 8);
     this->declare_parameter<double>("handeye_outlier_abs_mm", 15.0);
     this->declare_parameter<double>("handeye_outlier_mad_sigma", 4.0);
+    this->declare_parameter<bool>("gravity_calibration_enable", true);
+    this->declare_parameter<std::string>("gravity_raw_tcp_topic", "/ur10skku/ftdata_tcp_raw");
+    this->declare_parameter<std::string>("gravity_calibration_file", gravity_yaml_path_);
+    this->declare_parameter<double>("gravity_wrench_fresh_s", 0.10);
+    this->declare_parameter<double>("gravity_max_sync_dt_s", 0.05);
+    this->declare_parameter<int>("gravity_min_pose_samples", 12);
+    this->declare_parameter<int>("gravity_min_window_samples", 5);
+    this->declare_parameter<double>("gravity_max_condition_number", 30.0);
+    this->declare_parameter<double>("gravity_max_force_rms_n", 2.0);
+    this->declare_parameter<double>("gravity_max_torque_rms_nm", 0.35);
+    this->declare_parameter<double>("gravity_min_mass_kg", 0.05);
+    this->declare_parameter<double>("gravity_max_mass_kg", 15.0);
+    this->declare_parameter<double>("gravity_max_com_norm_m", 0.50);
+    this->declare_parameter<bool>("gravity_remote_deploy_enable", true);
+    this->declare_parameter<std::string>("gravity_remote_host", "nrs_forcecon@192.168.0.151");
+    this->declare_parameter<std::string>(
+      "gravity_remote_file",
+      "/home/nrs_forcecon/dev_ws/src/y2_ur10skku_control/Y2FT_AQ/config/spindle_gravity.yaml");
 
     t_sa_w_des_z_        = this->get_parameter("t_sa_w_des_z").as_double();
     t_sa_wait_timeout_s_ = this->get_parameter("t_sa_wait_timeout_s").as_double();
@@ -350,6 +371,33 @@ public:
       std::max(0.0, this->get_parameter("handeye_outlier_abs_mm").as_double());
     handeye_outlier_mad_sigma_ =
       std::max(0.0, this->get_parameter("handeye_outlier_mad_sigma").as_double());
+    gravity_calibration_enable_ = this->get_parameter("gravity_calibration_enable").as_bool();
+    gravity_raw_tcp_topic_ = this->get_parameter("gravity_raw_tcp_topic").as_string();
+    gravity_yaml_path_ = this->get_parameter("gravity_calibration_file").as_string();
+    gravity_wrench_fresh_s_ =
+      std::max(0.01, this->get_parameter("gravity_wrench_fresh_s").as_double());
+    gravity_max_sync_dt_s_ =
+      std::max(0.0, this->get_parameter("gravity_max_sync_dt_s").as_double());
+    gravity_min_pose_samples_ = static_cast<size_t>(std::max<int64_t>(
+      6, this->get_parameter("gravity_min_pose_samples").as_int()));
+    gravity_min_window_samples_ = static_cast<size_t>(std::max<int64_t>(
+      1, this->get_parameter("gravity_min_window_samples").as_int()));
+    gravity_max_condition_number_ =
+      std::max(1.0, this->get_parameter("gravity_max_condition_number").as_double());
+    gravity_max_force_rms_n_ =
+      std::max(0.0, this->get_parameter("gravity_max_force_rms_n").as_double());
+    gravity_max_torque_rms_nm_ =
+      std::max(0.0, this->get_parameter("gravity_max_torque_rms_nm").as_double());
+    gravity_min_mass_kg_ =
+      std::max(0.0, this->get_parameter("gravity_min_mass_kg").as_double());
+    gravity_max_mass_kg_ =
+      std::max(gravity_min_mass_kg_, this->get_parameter("gravity_max_mass_kg").as_double());
+    gravity_max_com_norm_m_ =
+      std::max(0.0, this->get_parameter("gravity_max_com_norm_m").as_double());
+    gravity_remote_deploy_enable_ =
+      this->get_parameter("gravity_remote_deploy_enable").as_bool();
+    gravity_remote_host_ = this->get_parameter("gravity_remote_host").as_string();
+    gravity_remote_file_ = this->get_parameter("gravity_remote_file").as_string();
 
     // ----------------------------
     // Waypoints
@@ -385,6 +433,13 @@ public:
         "/calibrated_pose", 10,
         std::bind(&VrCalibration::cbCalibratedPose, this, std::placeholders::_1));
 
+    if (gravity_calibration_enable_) {
+      sub_gravity_wrench_ =
+        create_subscription<geometry_msgs::msg::WrenchStamped>(
+          gravity_raw_tcp_topic_, rclcpp::SensorDataQoS(),
+          std::bind(&VrCalibration::cbGravityWrench, this, std::placeholders::_1));
+    }
+
     // load existing constants (T_CE, T_SA_old)
     loadExistingYamlConstants();
 
@@ -397,6 +452,12 @@ public:
     RCLCPP_INFO(get_logger(),
       "[FILES] ee_out=%s vr_out=%s yaml=%s",
       ee_path_.c_str(), vr_path_.c_str(), calib_yaml_path_.c_str());
+    RCLCPP_INFO(get_logger(),
+      "[GRAVITY] enable=%s raw=%s out=%s min_poses=%zu remote=%s",
+      gravity_calibration_enable_ ? "true" : "false",
+      gravity_raw_tcp_topic_.c_str(), gravity_yaml_path_.c_str(),
+      gravity_min_pose_samples_,
+      gravity_remote_deploy_enable_ ? gravity_remote_host_.c_str() : "disabled");
 
     RCLCPP_INFO(get_logger(),
       "[T_SA] mode=%s max=%.1fdeg",
@@ -681,6 +742,24 @@ private:
   bool handeye_outlier_reject_active_{false};
   size_t handeye_outlier_rejected_count_{0};
 
+  // Robot-FT-only spindle gravity identification.
+  bool gravity_calibration_enable_{true};
+  std::string gravity_raw_tcp_topic_{"/ur10skku/ftdata_tcp_raw"};
+  std::string gravity_yaml_path_;
+  double gravity_wrench_fresh_s_{0.10};
+  double gravity_max_sync_dt_s_{0.05};
+  size_t gravity_min_pose_samples_{12};
+  size_t gravity_min_window_samples_{5};
+  double gravity_max_condition_number_{30.0};
+  double gravity_max_force_rms_n_{2.0};
+  double gravity_max_torque_rms_nm_{0.35};
+  double gravity_min_mass_kg_{0.05};
+  double gravity_max_mass_kg_{15.0};
+  double gravity_max_com_norm_m_{0.50};
+  bool gravity_remote_deploy_enable_{true};
+  std::string gravity_remote_host_{"nrs_forcecon@192.168.0.151"};
+  std::string gravity_remote_file_;
+
   // ✅ NEW
   std::string t_sa_mode_{"update"};   // keep/update
   double t_sa_max_delta_deg_{180.0};  // update guard
@@ -717,6 +796,9 @@ private:
   rclcpp::Time last_cp_time_;
   rclcpp::Time last_vr_time_;
   uint64_t cp_seq_{0};
+  std::array<double,6> last_gravity_wrench_{};
+  rclcpp::Time last_gravity_wrench_time_;
+  bool have_gravity_wrench_{false};
 
   // calibrated_pose (for T_SA)
   bool have_cal_pose_{false};
@@ -742,6 +824,9 @@ private:
     double ang_deg{0.0};
     double vnorm_mms{0.0};
     double omega_dps{0.0};
+    std::array<double,6> gravity_wrench{};
+    rclcpp::Time gravity_wrench_t;
+    bool have_gravity_wrench{false};
   };
 
   struct CaptureWindowStats
@@ -762,6 +847,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_currentP_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_vr_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr sub_calibrated_pose_;
+  rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr sub_gravity_wrench_;
 
   // ---------- files ----------
   std::string waypoint_file_;
@@ -800,6 +886,15 @@ private:
   std::vector<Eigen::Matrix4d> T_AB_all_; // arm
   std::vector<Eigen::Matrix4d> T_DC_all_; // tracker
   std::vector<size_t> sample_wp_indices_;
+
+  struct GravityPoseSample
+  {
+    Eigen::Vector3d gravity_tcp = Eigen::Vector3d::Zero();
+    Eigen::Matrix<double,6,1> wrench_tcp = Eigen::Matrix<double,6,1>::Zero();
+    size_t waypoint_index{0};
+    size_t window_samples{0};
+  };
+  std::vector<GravityPoseSample> gravity_pose_samples_;
 
   // storage for finalize step
   std::vector<Eigen::Vector3d> O_B0B1_list_;
@@ -887,6 +982,17 @@ private:
     for (int i=0;i<6;i++) last_cal_pose_[i] = msg->data[i];
     last_cal_pose_time_ = ts;
     have_cal_pose_ = true;
+  }
+
+  void cbGravityWrench(const geometry_msgs::msg::WrenchStamped::SharedPtr msg)
+  {
+    const auto ts = tnow();
+    std::lock_guard<std::mutex> lk(mtx_);
+    last_gravity_wrench_ = {
+      msg->wrench.force.x, msg->wrench.force.y, msg->wrench.force.z,
+      msg->wrench.torque.x, msg->wrench.torque.y, msg->wrench.torque.z};
+    last_gravity_wrench_time_ = ts;
+    have_gravity_wrench_ = true;
   }
 
   // ---------- waypoint parsing ----------
@@ -1135,6 +1241,19 @@ private:
     s.ang_deg = ang_deg;
     s.vnorm_mms = last_vnorm_mms_;
     s.omega_dps = last_omega_dps_;
+    if (gravity_calibration_enable_) {
+      std::lock_guard<std::mutex> lk(mtx_);
+      if (have_gravity_wrench_) {
+        const double age_s = (tnow() - last_gravity_wrench_time_).seconds();
+        const double sync_s = std::fabs((cp_t - last_gravity_wrench_time_).seconds());
+        if (age_s <= gravity_wrench_fresh_s_ &&
+            (gravity_max_sync_dt_s_ <= 0.0 || sync_s <= gravity_max_sync_dt_s_)) {
+          s.gravity_wrench = last_gravity_wrench_;
+          s.gravity_wrench_t = last_gravity_wrench_time_;
+          s.have_gravity_wrench = true;
+        }
+      }
+    }
     clean_capture_samples_.push_back(s);
   }
 
@@ -1542,6 +1661,48 @@ private:
     t_sa_computed_ = false;
   }
 
+  void captureGravitySample(const std::array<double,6>& cp, size_t wp_idx)
+  {
+    if (!gravity_calibration_enable_) return;
+
+    std::array<std::vector<double>,6> axis_values;
+    size_t sample_count = 0;
+    for (const auto& sample : clean_capture_samples_) {
+      if (!sample.have_gravity_wrench) continue;
+      for (size_t axis = 0; axis < 6; ++axis) {
+        axis_values[axis].push_back(sample.gravity_wrench[axis]);
+      }
+      ++sample_count;
+    }
+    if (sample_count < gravity_min_window_samples_) {
+      RCLCPP_WARN(get_logger(),
+        "[GRAVITY_SKIP] wp=%zu wrench window n=%zu/%zu",
+        wp_idx + 1, sample_count, gravity_min_window_samples_);
+      return;
+    }
+
+    const auto w_c = toRotvecRad_CP(cp);
+    std::array<double,9> Rarr;
+    rotvecToRotMatRad(w_c, Rarr);
+    Eigen::Matrix3d R_base_tcp;
+    R_base_tcp << Rarr[0], Rarr[1], Rarr[2],
+                  Rarr[3], Rarr[4], Rarr[5],
+                  Rarr[6], Rarr[7], Rarr[8];
+
+    GravityPoseSample out;
+    out.gravity_tcp = R_base_tcp.transpose() * Eigen::Vector3d(0.0, 0.0, -9.81);
+    for (size_t axis = 0; axis < 6; ++axis) {
+      out.wrench_tcp(static_cast<Eigen::Index>(axis)) = medianValue(axis_values[axis]);
+    }
+    out.waypoint_index = wp_idx;
+    out.window_samples = sample_count;
+    gravity_pose_samples_.push_back(out);
+    RCLCPP_INFO(get_logger(),
+      "[GRAVITY_CAPTURE] wp=%zu pose=%zu g=[%.3f %.3f %.3f] n=%zu",
+      wp_idx + 1, gravity_pose_samples_.size(),
+      out.gravity_tcp.x(), out.gravity_tcp.y(), out.gravity_tcp.z(), sample_count);
+  }
+
   // ---------- capture ----------
   void captureOnce(size_t target_k, size_t wp_idx,
                    const std::array<double,6>& cp,
@@ -1592,6 +1753,7 @@ private:
     Eigen::Vector3d p_dc(vr_x, vr_y, vr_z);
     T_DC_all_.push_back(makeT(R_dc, p_dc));
     sample_wp_indices_.push_back(wp_idx);
+    captureGravitySample(cp, wp_idx);
 
     RCLCPP_INFO(get_logger(),
       "[CAPTURE] target %zu/%zu wp=%zu",
@@ -2167,6 +2329,207 @@ private:
     return 0;
   }
 
+  static Eigen::Matrix3d skew3(const Eigen::Vector3d& v)
+  {
+    Eigen::Matrix3d S;
+    S << 0.0, -v.z(), v.y(),
+         v.z(), 0.0, -v.x(),
+         -v.y(), v.x(), 0.0;
+    return S;
+  }
+
+  static std::string shellQuote(const std::string& value)
+  {
+    std::string out = "'";
+    for (char c : value) {
+      if (c == '\'') out += "'\\''";
+      else out += c;
+    }
+    out += "'";
+    return out;
+  }
+
+  bool deployGravityYamlRemote() const
+  {
+    if (!gravity_remote_deploy_enable_) return true;
+    if (gravity_remote_host_.empty() || gravity_remote_file_.empty()) {
+      RCLCPP_ERROR(get_logger(), "[GRAVITY_REMOTE] host/path is empty");
+      return false;
+    }
+
+    const std::string remote_tmp =
+      "/tmp/spindle_gravity_" + std::to_string(static_cast<long long>(std::time(nullptr))) + ".yaml";
+    const std::string remote_spec = gravity_remote_host_ + ":" + remote_tmp;
+    const std::string scp_cmd =
+      "scp -q -o BatchMode=yes -o ConnectTimeout=5 -- " +
+      shellQuote(gravity_yaml_path_) + " " + shellQuote(remote_spec);
+    if (std::system(scp_cmd.c_str()) != 0) {
+      RCLCPP_ERROR(get_logger(),
+        "[GRAVITY_REMOTE] scp failed; configure passwordless SSH for %s",
+        gravity_remote_host_.c_str());
+      return false;
+    }
+
+    const std::filesystem::path remote_target(gravity_remote_file_);
+    const std::string remote_dir = remote_target.parent_path().string();
+    const std::string remote_cmd =
+      "set -e; test -d " + shellQuote(remote_dir) +
+      "; if test -f " + shellQuote(gravity_remote_file_) +
+      "; then cp -- " + shellQuote(gravity_remote_file_) + " " +
+      shellQuote(gravity_remote_file_ + ".bak") +
+      "; fi; chmod 0644 " + shellQuote(remote_tmp) +
+      "; mv -- " + shellQuote(remote_tmp) + " " + shellQuote(gravity_remote_file_);
+    const std::string ssh_cmd =
+      "ssh -o BatchMode=yes -o ConnectTimeout=5 -- " + shellQuote(gravity_remote_host_) +
+      " " + shellQuote(remote_cmd);
+    if (std::system(ssh_cmd.c_str()) != 0) {
+      RCLCPP_ERROR(get_logger(),
+        "[GRAVITY_REMOTE] atomic install failed: %s:%s",
+        gravity_remote_host_.c_str(), gravity_remote_file_.c_str());
+      return false;
+    }
+
+    RCLCPP_INFO(get_logger(), "[GRAVITY_REMOTE] updated %s:%s (backup=.bak)",
+      gravity_remote_host_.c_str(), gravity_remote_file_.c_str());
+    return true;
+  }
+
+  void finalizeGravityCalibration()
+  {
+    if (!gravity_calibration_enable_) return;
+    const size_t N = gravity_pose_samples_.size();
+    if (N < gravity_min_pose_samples_) {
+      throw std::runtime_error(
+        "Spindle gravity fit rejected: only " + std::to_string(N) +
+        " pose samples; need " + std::to_string(gravity_min_pose_samples_) + ".");
+    }
+
+    Eigen::MatrixXd G(static_cast<Eigen::Index>(N), 3);
+    Eigen::MatrixXd W(static_cast<Eigen::Index>(N), 6);
+    for (size_t i = 0; i < N; ++i) {
+      G.row(static_cast<Eigen::Index>(i)) = gravity_pose_samples_[i].gravity_tcp.transpose();
+      W.row(static_cast<Eigen::Index>(i)) = gravity_pose_samples_[i].wrench_tcp.transpose();
+    }
+    const Eigen::RowVector3d g_mean = G.colwise().mean();
+    const Eigen::Matrix<double,1,6> w_mean = W.colwise().mean();
+    const Eigen::MatrixXd Gc = G.rowwise() - g_mean;
+    const Eigen::MatrixXd Wc = W.rowwise() - w_mean;
+
+    Eigen::JacobiSVD<Eigen::MatrixXd> g_svd(Gc, Eigen::ComputeThinU | Eigen::ComputeThinV);
+    const Eigen::VectorXd sv = g_svd.singularValues();
+    if (sv.size() < 3 || sv(2) <= 1e-8) {
+      throw std::runtime_error("Spindle gravity fit rejected: gravity directions are rank deficient.");
+    }
+    const double condition_number = sv(0) / sv(2);
+    if (!std::isfinite(condition_number) || condition_number > gravity_max_condition_number_) {
+      std::ostringstream oss;
+      oss << "Spindle gravity fit rejected: condition number " << condition_number
+          << " exceeds " << gravity_max_condition_number_ << ".";
+      throw std::runtime_error(oss.str());
+    }
+
+    const Eigen::Matrix<double,3,6> x_full = Gc.colPivHouseholderQr().solve(Wc);
+    const Eigen::Matrix<double,6,3> h_full = x_full.transpose();
+
+    const Eigen::MatrixXd Fc = Wc.leftCols(3);
+    const double g_energy = Gc.squaredNorm();
+    const double mass_kg = (Gc.array() * Fc.array()).sum() / g_energy;
+    if (!std::isfinite(mass_kg) || mass_kg < gravity_min_mass_kg_ ||
+        mass_kg > gravity_max_mass_kg_) {
+      std::ostringstream oss;
+      oss << "Spindle gravity fit rejected: mass " << mass_kg << " kg outside ["
+          << gravity_min_mass_kg_ << ", " << gravity_max_mass_kg_ << "].";
+      throw std::runtime_error(oss.str());
+    }
+
+    Eigen::MatrixXd A(3 * static_cast<Eigen::Index>(N), 3);
+    Eigen::VectorXd b(3 * static_cast<Eigen::Index>(N));
+    for (size_t i = 0; i < N; ++i) {
+      const Eigen::Vector3d f_g = mass_kg * Gc.row(static_cast<Eigen::Index>(i)).transpose();
+      A.block<3,3>(3 * static_cast<Eigen::Index>(i), 0) = -skew3(f_g);
+      b.segment<3>(3 * static_cast<Eigen::Index>(i)) =
+        Wc.row(static_cast<Eigen::Index>(i)).segment<3>(3).transpose();
+    }
+    const Eigen::Vector3d com_tcp_m = A.colPivHouseholderQr().solve(b);
+    if (!com_tcp_m.allFinite() || com_tcp_m.norm() > gravity_max_com_norm_m_) {
+      std::ostringstream oss;
+      oss << "Spindle gravity fit rejected: CoM norm " << com_tcp_m.norm()
+          << " m exceeds " << gravity_max_com_norm_m_ << " m.";
+      throw std::runtime_error(oss.str());
+    }
+
+    Eigen::Matrix<double,6,3> H = Eigen::Matrix<double,6,3>::Zero();
+    H.topRows<3>() = mass_kg * Eigen::Matrix3d::Identity();
+    H.bottomRows<3>() = mass_kg * skew3(com_tcp_m);
+    const Eigen::Matrix<double,1,6> bias = w_mean - g_mean * H.transpose();
+    Eigen::MatrixXd predicted = G * H.transpose();
+    predicted.rowwise() += bias;
+    const Eigen::MatrixXd residual = W - predicted;
+    const double force_rms_n =
+      std::sqrt(residual.leftCols(3).squaredNorm() / static_cast<double>(N));
+    const double torque_rms_nm =
+      std::sqrt(residual.rightCols(3).squaredNorm() / static_cast<double>(N));
+    if (force_rms_n > gravity_max_force_rms_n_ ||
+        torque_rms_nm > gravity_max_torque_rms_nm_) {
+      std::ostringstream oss;
+      oss << "Spindle gravity fit rejected: residual RMS force=" << force_rms_n
+          << " N, torque=" << torque_rms_nm << " Nm.";
+      throw std::runtime_error(oss.str());
+    }
+
+    ensureParentDirectoryExists(gravity_yaml_path_);
+    const std::string tmp_path = gravity_yaml_path_ + ".tmp";
+    {
+      std::ofstream ofs(tmp_path, std::ios::out | std::ios::trunc);
+      if (!ofs.is_open()) throw std::runtime_error("Failed to open gravity YAML: " + tmp_path);
+      const int prec = 12;
+      ofs << "# Robot-FT identified spindle gravity model; no STL geometry is used.\n";
+      ofs << "schema_version: 1\n";
+      ofs << "calibration_id: \"" << nowLocalString() << "\"\n";
+      ofs << "enabled: true\n";
+      ofs << "frame: tcp\n";
+      ofs << std::fixed << std::setprecision(prec);
+      ofs << "mass_kg: " << mass_kg << "\n";
+      ofs << "com_tcp_m: [" << com_tcp_m.x() << ", " << com_tcp_m.y() << ", "
+          << com_tcp_m.z() << "]\n";
+      ofs << "matrix_6x3:\n";
+      for (int r = 0; r < 6; ++r) {
+        ofs << "  - [" << H(r,0) << ", " << H(r,1) << ", " << H(r,2) << "]\n";
+      }
+      ofs << "fit:\n";
+      ofs << "  pose_samples: " << N << "\n";
+      ofs << "  condition_number: " << condition_number << "\n";
+      ofs << "  force_rms_n: " << force_rms_n << "\n";
+      ofs << "  torque_rms_nm: " << torque_rms_nm << "\n";
+      ofs << "  unrestricted_matrix_6x3:\n";
+      for (int r = 0; r < 6; ++r) {
+        ofs << "    - [" << h_full(r,0) << ", " << h_full(r,1) << ", " << h_full(r,2) << "]\n";
+      }
+      ofs.flush();
+      if (!ofs.good()) throw std::runtime_error("Failed while writing gravity YAML: " + tmp_path);
+    }
+    const YAML::Node check = YAML::LoadFile(tmp_path);
+    if (!check["matrix_6x3"] || check["matrix_6x3"].size() != 6) {
+      throw std::runtime_error("Generated gravity YAML failed validation.");
+    }
+    if (std::filesystem::exists(gravity_yaml_path_)) {
+      std::filesystem::copy_file(
+        gravity_yaml_path_, gravity_yaml_path_ + ".bak",
+        std::filesystem::copy_options::overwrite_existing);
+    }
+    std::filesystem::rename(tmp_path, gravity_yaml_path_);
+
+    RCLCPP_INFO(get_logger(),
+      "[GRAVITY_SAVED] n=%zu cond=%.3f mass=%.6fkg com=[%.6f %.6f %.6f]m rms=[%.3fN %.4fNm]",
+      N, condition_number, mass_kg,
+      com_tcp_m.x(), com_tcp_m.y(), com_tcp_m.z(), force_rms_n, torque_rms_nm);
+    RCLCPP_INFO(get_logger(), "[GRAVITY_SAVED] %s (backup=.bak)", gravity_yaml_path_.c_str());
+    if (!deployGravityYamlRemote()) {
+      RCLCPP_ERROR(get_logger(),
+        "[GRAVITY_REMOTE] local YAML is valid but remote update did not complete");
+    }
+  }
+
   // ---------- compute T_BC / T_AD_avg and save yaml ----------
   void finalizeCalibrationAndSaveYaml()
   {
@@ -2416,6 +2779,14 @@ private:
     RCLCPP_INFO(get_logger(),
       "[YAML_SAVED] %s",
       calib_yaml_path_.c_str());
+
+    try {
+      finalizeGravityCalibration();
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(get_logger(), "[GRAVITY_REJECTED] %s", e.what());
+      RCLCPP_ERROR(get_logger(),
+        "[GRAVITY_REJECTED] existing spindle gravity YAML was preserved");
+    }
   }
 
   void writeCalibrationYamlAll(const Eigen::Matrix4d& T_AD,
