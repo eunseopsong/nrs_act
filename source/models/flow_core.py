@@ -32,6 +32,11 @@ from .stain_pooling import (
     save_stain_pooling_debug_images,
     stain_pooling_debug_stats,
 )
+from .dinov3_backbone import (
+    DINOv3PatchBackbone,
+    ROIPatchAttentionPool,
+    build_fixed_tcp_roi_mask,
+)
 
 try:
     from torchvision.models import resnet18, ResNet18_Weights
@@ -192,7 +197,19 @@ class FlowRGBObservationEncoder(nn.Module):
         marker_feature_dim = int(cfg.get("flow_marker_feature_dim", 128))
         global_cond_dim = int(cfg.get("flow_global_cond_dim", 256))
         pretrained_backbone = bool(cfg.get("pretrained_backbone", True))
+        self.image_backbone_name = str(cfg.get("image_backbone", "dinov3")).strip().lower()
+        if self.image_backbone_name == "dinov3_vits16":
+            self.image_backbone_name = "dinov3"
+        self.use_tcp_roi = bool(cfg.get("use_tcp_roi", True))
+        # Legacy external-mask checkpoints remain loadable, but new RGB-only
+        # training should leave this disabled and use the internal TCP ROI.
         self.use_stain_mask = bool(cfg.get("use_stain_mask", False))
+        self.use_roi_feature = self.use_tcp_roi or self.use_stain_mask
+        self.tcp_roi_reference_width = int(cfg.get("tcp_roi_reference_width", 424))
+        self.tcp_roi_reference_height = int(cfg.get("tcp_roi_reference_height", 240))
+        self.tcp_roi_center_x = int(cfg.get("tcp_roi_center_x", 253))
+        self.tcp_roi_center_y = int(cfg.get("tcp_roi_center_y", 120))
+        self.tcp_roi_area_fraction = float(cfg.get("tcp_roi_area_fraction", 0.10))
         self.stain_pooling_type = str(cfg.get("stain_pooling_type", "masked_mean"))
         self.empty_stain_feature_mode = str(cfg.get("empty_stain_feature_mode", "zero"))
         self.stain_mask_threshold = float(cfg.get("stain_mask_threshold", 0.5))
@@ -219,19 +236,43 @@ class FlowRGBObservationEncoder(nn.Module):
             self.force_gru = None
             force_out_dim = 0
 
-        if ResNet18_Weights is not None:
-            weights = ResNet18_Weights.DEFAULT if pretrained_backbone else None
-            backbone = resnet18(weights=weights)
+        if self.image_backbone_name == "resnet18":
+            if ResNet18_Weights is not None:
+                weights = ResNet18_Weights.DEFAULT if pretrained_backbone else None
+                backbone = resnet18(weights=weights)
+            else:
+                backbone = resnet18(pretrained=pretrained_backbone)
+            backbone.fc = nn.Identity()
+            self.image_backbone = backbone
+            image_backbone_dim = 512
+            self.roi_patch_pool = None
+        elif self.image_backbone_name == "dinov3":
+            self.image_backbone = DINOv3PatchBackbone(
+                model_name=str(cfg.get("dino_model_name", "vit_small_patch16_dinov3.lvd1689m")),
+                pretrained=pretrained_backbone,
+                freeze=bool(cfg.get("freeze_image_backbone", True)),
+                checkpoint_path=str(cfg.get("dino_checkpoint_path", "")),
+            )
+            image_backbone_dim = self.image_backbone.feature_dim
+            roi_pooling = str(cfg.get("dino_roi_pooling", "attention")).strip().lower()
+            if roi_pooling not in ("attention", "masked_mean"):
+                raise ValueError(f"dino_roi_pooling must be attention or masked_mean, got {roi_pooling}")
+            self.dino_roi_pooling = roi_pooling
+            self.roi_patch_pool = (
+                ROIPatchAttentionPool(image_backbone_dim, empty_mode=self.empty_stain_feature_mode)
+                if roi_pooling == "attention"
+                else None
+            )
         else:
-            backbone = resnet18(pretrained=pretrained_backbone)
-        backbone.fc = nn.Identity()
-        self.image_backbone = backbone
+            raise ValueError(
+                f"Unsupported image_backbone={self.image_backbone_name}; expected resnet18 or dinov3"
+            )
         self.image_proj = nn.Sequential(
-            nn.Linear(512, image_feature_dim),
+            nn.Linear(image_backbone_dim, image_feature_dim),
             nn.LayerNorm(image_feature_dim),
             nn.Mish(),
         )
-        image_out_dim = (self.num_cameras + (1 if self.use_stain_mask else 0)) * image_feature_dim
+        image_out_dim = (self.num_cameras + (1 if self.use_roi_feature else 0)) * image_feature_dim
 
         if self.use_marker:
             self.marker_encoder = _mish_mlp(marker_dim, marker_feature_dim, marker_feature_dim)
@@ -251,6 +292,8 @@ class FlowRGBObservationEncoder(nn.Module):
         self.marker_dim = marker_dim
 
     def _forward_image_features(self, x: torch.Tensor) -> torch.Tensor:
+        if self.image_backbone_name != "resnet18":
+            raise RuntimeError("_forward_image_features is only valid for the ResNet18 image backbone")
         b = self.image_backbone
         x = b.conv1(x)
         x = b.bn1(x)
@@ -263,7 +306,173 @@ class FlowRGBObservationEncoder(nn.Module):
         return x
 
     def _global_pool_image_features(self, feature_map: torch.Tensor) -> torch.Tensor:
+        if self.image_backbone_name != "resnet18":
+            raise RuntimeError("_global_pool_image_features is only valid for the ResNet18 image backbone")
         return torch.flatten(self.image_backbone.avgpool(feature_map), 1)
+
+    def _resolve_roi_mask(
+        self,
+        image_cam0: torch.Tensor,
+        stain_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Resolve the (B,1,H,W) mask used to pool a localized ROI feature.
+
+        Shared by every image backbone: either the fixed, calibrated TCP
+        interaction ROI, or (legacy checkpoints only) an externally supplied
+        stain mask.
+        """
+        if self.use_tcp_roi:
+            return build_fixed_tcp_roi_mask(
+                image_cam0,
+                reference_width=self.tcp_roi_reference_width,
+                reference_height=self.tcp_roi_reference_height,
+                center_x=self.tcp_roi_center_x,
+                center_y=self.tcp_roi_center_y,
+                area_fraction=self.tcp_roi_area_fraction,
+            )
+        if stain_mask is None:
+            raise RuntimeError(
+                "legacy use_stain_mask=True requires an external stain_mask; "
+                "new RGB-only checkpoints should use use_tcp_roi=True"
+            )
+        return stain_mask
+
+    def _log_roi_pooling_debug(
+        self,
+        *,
+        rgb: torch.Tensor,
+        roi_mask: torch.Tensor,
+        feature_map: torch.Tensor,
+        resized_mask: torch.Tensor,
+        global_feature: torch.Tensor,
+        roi_feature: torch.Tensor,
+        image_feature: torch.Tensor,
+        mask_sum: torch.Tensor,
+        log_prefix: str,
+        save_prefix: str,
+        extra_stats: Optional[dict] = None,
+    ) -> None:
+        if not self.debug_stain_pooling or self._debug_stain_pooling_printed:
+            return
+        stats = stain_pooling_debug_stats(
+            rgb=rgb,
+            stain_mask=roi_mask,
+            feature_map=feature_map,
+            resized_mask=resized_mask,
+            global_feature=global_feature,
+            stain_feature=roi_feature,
+            image_feature=image_feature,
+            mask_sum=mask_sum,
+        )
+        if extra_stats:
+            stats.update(extra_stats)
+        print(f"{log_prefix} {stats}")
+        save_stain_pooling_debug_images(rgb=rgb, stain_mask=roi_mask, prefix=save_prefix)
+        self._debug_stain_pooling_printed = True
+
+    def _encode_dinov3_images(
+        self,
+        image: torch.Tensor,
+        stain_mask: Optional[torch.Tensor],
+    ) -> list[torch.Tensor]:
+        B, K, C, H, W = image.shape
+        global_raw, patch_map, pad_hw = self.image_backbone(image.reshape(B * K, C, H, W))
+        global_proj = self.image_proj(global_raw).reshape(B, K, -1)
+        image_feature_parts = [global_proj[:, cam_i] for cam_i in range(K)]
+
+        if not self.use_roi_feature:
+            return image_feature_parts
+
+        roi_mask = self._resolve_roi_mask(image[:, 0], stain_mask)
+        patch_map_by_cam = patch_map.reshape(
+            B, K, patch_map.shape[1], patch_map.shape[2], patch_map.shape[3]
+        )
+        cam0_patch_map = patch_map_by_cam[:, 0]
+        cam0_global = global_raw.reshape(B, K, -1)[:, 0]
+        if self.dino_roi_pooling == "attention":
+            roi_raw, mask_small, mask_sum = self.roi_patch_pool(
+                cam0_patch_map,
+                roi_mask,
+                global_feature=cam0_global,
+                threshold=self.stain_mask_threshold,
+                pad_hw=pad_hw,
+            )
+        else:
+            mask_for_pool = roi_mask
+            if pad_hw[0] or pad_hw[1]:
+                mask_for_pool = F.pad(roi_mask, (0, pad_hw[1], 0, pad_hw[0]))
+            roi_raw, mask_small, mask_sum = masked_mean_pool_feature_map(
+                cam0_patch_map,
+                mask_for_pool,
+                threshold=self.stain_mask_threshold,
+                empty_mode=self.empty_stain_feature_mode,
+            )
+        roi_proj = self.image_proj(roi_raw)
+        image_feature_parts.insert(1, roi_proj)
+
+        self._log_roi_pooling_debug(
+            rgb=image[:, 0],
+            roi_mask=roi_mask,
+            feature_map=cam0_patch_map,
+            resized_mask=mask_small,
+            global_feature=cam0_global,
+            roi_feature=roi_raw,
+            image_feature=torch.cat([global_proj[:, 0], roi_proj], dim=-1),
+            mask_sum=mask_sum,
+            log_prefix="[STAIN_POOLING][FLOW][DINOV3]",
+            save_prefix="flow_dinov3",
+            extra_stats={
+                "image_backbone": self.image_backbone_name,
+                "dino_model_name": self.image_backbone.model_name,
+                "dino_patch_size": self.image_backbone.patch_size,
+                "dino_patch_grid": tuple(cam0_patch_map.shape[-2:]),
+                "dino_pad_hw": tuple(pad_hw),
+                "dino_roi_pooling": self.dino_roi_pooling,
+            },
+        )
+        return image_feature_parts
+
+    def _encode_resnet18_images(
+        self,
+        image: torch.Tensor,
+        stain_mask: Optional[torch.Tensor],
+    ) -> list[torch.Tensor]:
+        B, K, C, H, W = image.shape
+        feature_map = self._forward_image_features(image.reshape(B * K, C, H, W))
+        global_raw = self._global_pool_image_features(feature_map)
+        global_proj = self.image_proj(global_raw).reshape(B, K, -1)
+        image_feature_parts = [global_proj[:, cam_i] for cam_i in range(K)]
+
+        if not self.use_roi_feature:
+            return image_feature_parts
+
+        roi_mask = self._resolve_roi_mask(image[:, 0], stain_mask)
+        feature_map_by_cam = feature_map.reshape(
+            B, K, feature_map.shape[1], feature_map.shape[2], feature_map.shape[3]
+        )
+        cam0_feature_map = feature_map_by_cam[:, 0]
+        roi_raw, mask_small, mask_sum = masked_mean_pool_feature_map(
+            cam0_feature_map,
+            roi_mask,
+            threshold=self.stain_mask_threshold,
+            empty_mode=self.empty_stain_feature_mode,
+        )
+        roi_proj = self.image_proj(roi_raw)
+        image_feature_parts.insert(1, roi_proj)
+
+        self._log_roi_pooling_debug(
+            rgb=image[:, 0],
+            roi_mask=roi_mask,
+            feature_map=cam0_feature_map,
+            resized_mask=mask_small,
+            global_feature=global_raw.reshape(B, K, -1)[:, 0],
+            roi_feature=roi_raw,
+            image_feature=torch.cat([global_proj[:, 0], roi_proj], dim=-1),
+            mask_sum=mask_sum,
+            log_prefix="[STAIN_POOLING][FLOW]",
+            save_prefix="flow",
+        )
+        return image_feature_parts
 
     def forward(
         self,
@@ -288,44 +497,12 @@ class FlowRGBObservationEncoder(nn.Module):
 
         q_feat = self.qpos_encoder(qpos)
 
-        img_flat = image.reshape(B * K, C, H, W)
-        feature_map = self._forward_image_features(img_flat)
-        global_raw = self._global_pool_image_features(feature_map)
-        global_proj = self.image_proj(global_raw).reshape(B, K, -1)
-        image_feature_parts = [global_proj[:, cam_i] for cam_i in range(K)]
-
-        if self.use_stain_mask:
-            if stain_mask is None:
-                raise RuntimeError("use_stain_mask=True but stain_mask was not provided to FlowRGBObservationEncoder")
-            feature_map_by_cam = feature_map.reshape(B, K, feature_map.shape[1], feature_map.shape[2], feature_map.shape[3])
-            cam0_feature_map = feature_map_by_cam[:, 0]
-            stain_raw, mask_small, mask_sum = masked_mean_pool_feature_map(
-                cam0_feature_map,
-                stain_mask,
-                threshold=self.stain_mask_threshold,
-                empty_mode=self.empty_stain_feature_mode,
-            )
-            stain_proj = self.image_proj(stain_raw)
-            image_feature_parts.insert(1, stain_proj)
-            if self.debug_stain_pooling and not self._debug_stain_pooling_printed:
-                image_feature_debug = torch.cat([global_proj[:, 0], stain_proj], dim=-1)
-                stats = stain_pooling_debug_stats(
-                    rgb=image[:, 0],
-                    stain_mask=stain_mask,
-                    feature_map=cam0_feature_map,
-                    resized_mask=mask_small,
-                    global_feature=global_raw.reshape(B, K, -1)[:, 0],
-                    stain_feature=stain_raw,
-                    image_feature=image_feature_debug,
-                    mask_sum=mask_sum,
-                )
-                print(f"[STAIN_POOLING][FLOW] {stats}")
-                save_stain_pooling_debug_images(
-                    rgb=image[:, 0],
-                    stain_mask=stain_mask,
-                    prefix="flow",
-                )
-                self._debug_stain_pooling_printed = True
+        if self.image_backbone_name == "dinov3":
+            image_feature_parts = self._encode_dinov3_images(image, stain_mask)
+        elif self.image_backbone_name == "resnet18":
+            image_feature_parts = self._encode_resnet18_images(image, stain_mask)
+        else:
+            raise RuntimeError(f"Unsupported image_backbone={self.image_backbone_name}")
 
         img_feat = torch.cat(image_feature_parts, dim=-1)
 

@@ -370,13 +370,13 @@ force   /ftsensor/measured_Cvalue
 cam0    /realsense/vr/color/image_raw
 ```
 
-일반 recorder:
+FLOW/DINOv3용 RGB recorder:
 
 ```bash
 ros2 run nrs_imitation hdf5_recorder_single_cam
 ```
 
-Stain mask 학습 데이터를 만들 때:
+기존 ACT stain-mask 실험을 재현할 때만:
 
 ```bash
 ros2 run nrs_imitation hdf5_recorder_single_cam_stain_mask
@@ -521,7 +521,7 @@ observation과 action은 같은 demonstration 시점에 정렬되어 있고, 학
 | `gzip_level` | `4` | gzip level |
 | `overwrite` | `false` | 기존 output을 교체하지 않음 |
 | `write_summary` | `false` | `conversion_summary.json` 생성 여부 |
-| `stain_mask_mode` | `auto` | recorder metadata에 따라 copy/reference/none 선택 |
+| `stain_mask_mode` | single camera: `none` | DINOv3 FLOW는 RGB만 저장; 고정 TCP ROI는 encoder 내부 생성 |
 | `stain_reference_episode` | `ep_0000` | clean reference episode |
 
 `--overwrite`는 기존 `imitation_form` episode를 교체하므로 경로를 확인하고
@@ -631,7 +631,6 @@ observations/position             (T, 6)
 observations/force                (T, 3)
 observations/images/cam0          (T, H, W, 3)
 observations/images/cam1          (T, H, W, 3), dual only
-observations/images/stain_mask    (T, H, W), optional
 action/position                   (T, 6)
 action/force                      (T, 3)
 ```
@@ -705,7 +704,7 @@ Inference는 반드시 해당 checkpoint와 같은 stats/schema를 사용해야 
 | `prefetch_factor` | `2` | worker당 미리 준비할 batch 수 |
 | `save_every` | `50` | 중간 checkpoint 주기 |
 | `flow_infer_steps` | `10` | Flow ODE integration step |
-| Image backbone | pretrained ResNet18 | `--no_pretrained`로 비활성 |
+| Image backbone | frozen pretrained DINOv3 ViT-S/16 | `--image_backbone resnet18`로 기존 ResNet 선택 |
 
 `force_history_sec`와 `chunk_sec`가 양수이면 실제 step 수는
 `round(dataset_hz × seconds)`를 기반으로 계산된다. U-Net action horizon은
@@ -719,7 +718,7 @@ down/up sampling을 위해 4의 배수로 맞춘다.
 | `action_dim` | `9` | `11` |
 | `chunk_size` | `128` | `160` |
 | `chunk_sec` | `4.27` | `5.33` |
-| `use_stain_mask` | `true` | 해당 없음 |
+| `use_tcp_roi` | `true` | 해당 없음 |
 | `use_gripper_history` | 해당 없음 | `true` |
 | `gripper_history_sec` | 해당 없음 | `0.5` |
 | `gripper_history_len` | 해당 없음 | `15` |
@@ -748,10 +747,31 @@ python3 scripts/flow/train_flow_single_cam.py \
   --dataset_dir datasets/polishing/single_cam/<YYYYMMDD_HHMM>/imitation_form
 ```
 
-기본은 stain-mask feature를 사용한다. RGB-only baseline:
+DINOv3 ViT-S/16 + TCP ROI patch-attention 학습:
 
 ```bash
-python3 scripts/flow/train_flow_single_cam.py --no_stain_mask
+python3 -m pip install 'timm>=1.0.20,<2'
+python3 scripts/flow/train_flow_single_cam.py \
+  --dataset_dir datasets/polishing/single_cam/20260801_2233/imitation_form \
+  --image_backbone dinov3 \
+  --dino_roi_pooling attention \
+  --freeze_image_backbone
+```
+
+DINOv3가 기본 backbone이므로 `--image_backbone dinov3`,
+`--dino_roi_pooling attention`, `--freeze_image_backbone`은 생략할 수 있다.
+기존 ResNet18 baseline은 `--image_backbone resnet18`로 선택한다.
+
+`240x424` RGB는 encoder 내부에서 오른쪽에 8 pixel을 padding한 뒤 `15x27`
+DINO patch grid로 변환한다. `(253,120)` 중심의 10% 고정 TCP interaction ROI도
+encoder 내부에서 생성하며 HDF5에는 저장하지 않는다. 이 ROI는 patch 경계 기준
+`7x7=49` token, 전체 405 token의 약 12.1%와 겹친다. Pretrained DINO backbone은
+기본적으로 freeze하고 ROI attention/projection과 FLOW policy만 학습한다.
+
+TCP ROI를 제거하고 DINO global feature만 사용하는 baseline:
+
+```bash
+python3 scripts/flow/train_flow_single_cam.py --no_tcp_roi
 ```
 
 Dual camera:
@@ -904,16 +924,9 @@ ros2 launch nrs_imitation inference_gradcam_single_cam.launch.py \
   ckpt_dir:=/home/eunseop/nrs_imitation/checkpoints/flow/polishing/single_cam/<YYYYMMDD_HHMM>
 ```
 
-기본 Flow 학습은 stain mask를 사용하지만 inference launch의 mask는 안전하게
-비활성화되어 있다. Mask checkpoint를 실행할 때:
-
-```bash
-ros2 launch nrs_imitation inference_gradcam_single_cam.launch.py \
-  use_stain_mask:=true \
-  auto_stain_mask:=true
-```
-
-RGB-only checkpoint는 `use_stain_mask:=false`를 유지한다.
+기본 FLOW/DINOv3 checkpoint는 RGB만 입력받고 고정 TCP ROI를 encoder 내부에서
+생성하므로 stain-mask topic이나 publisher가 필요 없다. ROI 좌표는 checkpoint
+metadata에서 자동 복원된다.
 
 ACT:
 

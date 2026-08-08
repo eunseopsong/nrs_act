@@ -23,6 +23,13 @@ DEFAULT_ROS_ARGS = [
     "-p", "auto_move_to_demo_start:=true",
     "-p", "demo_start_move_sec:=5.0",
     "-p", "demo_start_hold_sec:=2.0",
+    # Allow long start alignment, but stretch the smoothstep trajectory to
+    # bounded XYZ/angular speed and wait for measured TCP convergence.
+    "-p", "demo_start_max_align_dist_mm:=0.0",
+    "-p", "demo_start_max_xyz_speed_mm_s:=50.0",
+    "-p", "demo_start_max_rot_speed_rad_s:=0.25",
+    "-p", "demo_start_position_tolerance_mm:=5.0",
+    "-p", "demo_start_rotation_tolerance_rad:=0.05",
     "-p", "tau_sec:=0.8",
     "-p", "startup_ramp_sec:=3.0",
     "-p", "step_cap_pos_mm:=0.05",

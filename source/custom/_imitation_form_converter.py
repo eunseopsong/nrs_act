@@ -45,6 +45,102 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATASETS_ROOT = PROJECT_ROOT / "datasets"
 
 
+def _tcp_square_roi_bounds(
+    width: int,
+    height: int,
+    *,
+    reference_width: int,
+    reference_height: int,
+    center_x: int,
+    center_y: int,
+    area_fraction: float,
+) -> Tuple[int, int, int, int]:
+    if width <= 0 or height <= 0 or reference_width <= 0 or reference_height <= 0:
+        raise ValueError("image and TCP ROI reference resolutions must be positive")
+    if not (0.0 < float(area_fraction) <= 1.0):
+        raise ValueError(f"tcp_roi_area_fraction must be in (0,1], got {area_fraction}")
+    cx = float(center_x) * float(width) / float(reference_width)
+    cy = float(center_y) * float(height) / float(reference_height)
+    side = max(1, int(round((float(width * height) * float(area_fraction)) ** 0.5)))
+    x0 = max(0, min(width - 1, int(round(cx)) - side // 2))
+    y0 = max(0, min(height - 1, int(round(cy)) - side // 2))
+    x1 = min(width, x0 + side)
+    y1 = min(height, y0 + side)
+    return max(0, x1 - side), max(0, y1 - side), x1, y1
+
+
+def write_ep0_dino_image_debug(
+    episode_path: Path,
+    output_dir: Path,
+    *,
+    reference_width: int = 424,
+    reference_height: int = 240,
+    center_x: int = 253,
+    center_y: int = 120,
+    area_fraction: float = 0.10,
+    patch_size: int = 16,
+) -> Tuple[Path, Path]:
+    """Save ep0 frame 0 RGB and its internally generated DINO TCP-token ROI."""
+    with h5py.File(str(episode_path), "r") as f:
+        if "observations/images/cam0" not in f:
+            raise KeyError(f"observations/images/cam0 missing in {episode_path}")
+        rgb = np.asarray(f["observations/images/cam0"][0], dtype=np.uint8)
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError(f"cam0 frame must be HxWx3 RGB, got {rgb.shape}")
+
+    height, width = rgb.shape[:2]
+    x0, y0, x1, y1 = _tcp_square_roi_bounds(
+        width,
+        height,
+        reference_width=reference_width,
+        reference_height=reference_height,
+        center_x=center_x,
+        center_y=center_y,
+        area_fraction=area_fraction,
+    )
+    raw_path = output_dir / "plot_4_ep0_raw_rgb.png"
+    roi_path = output_dir / "plot_5_ep0_dinov3_tcp_roi_tokens.png"
+
+    if cv2 is not None:
+        cv2.imwrite(str(raw_path), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+        overlay = rgb.copy()
+        tint = overlay.copy()
+        tint[y0:y1, x0:x1] = np.array([255, 210, 0], dtype=np.uint8)
+        overlay = cv2.addWeighted(overlay, 0.70, tint, 0.30, 0.0)
+        p = max(1, int(patch_size))
+        col0, col1 = x0 // p, (x1 + p - 1) // p
+        row0, row1 = y0 // p, (y1 + p - 1) // p
+        for row in range(row0, row1):
+            for col in range(col0, col1):
+                px0, py0 = col * p, row * p
+                px1, py1 = min(width - 1, (col + 1) * p), min(height - 1, (row + 1) * p)
+                cv2.rectangle(overlay, (px0, py0), (px1, py1), (0, 255, 255), 1)
+        cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 40, 40), 2)
+        cx = int(round(float(center_x) * width / reference_width))
+        cy = int(round(float(center_y) * height / reference_height))
+        cv2.drawMarker(overlay, (cx, cy), (0, 255, 255), cv2.MARKER_CROSS, 16, 2)
+        label = f"DINO /{p} TCP ROI x=[{x0},{x1}) y=[{y0},{y1}) tokens={row1-row0}x{col1-col0}"
+        cv2.rectangle(overlay, (4, 4), (min(width - 1, 418), 27), (0, 0, 0), -1)
+        cv2.putText(overlay, label, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.imwrite(str(roi_path), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+    else:
+        from PIL import Image, ImageDraw
+
+        Image.fromarray(rgb).save(raw_path)
+        image = Image.fromarray(rgb)
+        draw = ImageDraw.Draw(image, "RGBA")
+        draw.rectangle((x0, y0, x1 - 1, y1 - 1), fill=(255, 210, 0, 70), outline=(255, 40, 40, 255), width=2)
+        p = max(1, int(patch_size))
+        for row in range(y0 // p, (y1 + p - 1) // p):
+            for col in range(x0 // p, (x1 + p - 1) // p):
+                draw.rectangle((col * p, row * p, min(width - 1, (col + 1) * p), min(height - 1, (row + 1) * p)), outline=(0, 255, 255, 255), width=1)
+        image.save(roi_path)
+
+    print(f"[INFO] wrote ep0 RGB debug: {raw_path}")
+    print(f"[INFO] wrote DINO TCP-token ROI debug: {roi_path}")
+    return raw_path, roi_path
+
+
 def _hdf5_files_under(path: Path, recursive: bool = False) -> List[Path]:
     patterns = ["**/*.hdf5", "**/*.h5"] if recursive else ["*.hdf5", "*.h5"]
     files: List[Path] = []
@@ -1609,6 +1705,9 @@ def write_episode(
     truncated: bool,
     zero_action_force_xy: bool = False,
     mask_metadata: Optional[Dict[str, object]] = None,
+    position_xy_alignment_metadata: Optional[Dict[str, object]] = None,
+    position_z_alignment_metadata: Optional[Dict[str, object]] = None,
+    orientation_alignment_metadata: Optional[Dict[str, object]] = None,
 ) -> None:
     if out_path.exists():
         out_path.unlink()
@@ -1627,12 +1726,36 @@ def write_episode(
         f.attrs["action_dim"] = 11 if has_gripper else 9
         f.attrs["action_force_xy_zeroed"] = int(bool(zero_action_force_xy))
         f.attrs["observation_force_xy_preserved"] = 1
+        f.attrs["position_xy_aligned"] = int(position_xy_alignment_metadata is not None)
+        f.attrs["position_z_aligned"] = int(position_z_alignment_metadata is not None)
+        f.attrs["orientation_aligned"] = int(orientation_alignment_metadata is not None)
+        f.attrs["position_xy_preserved"] = int(position_xy_alignment_metadata is None)
+        f.attrs["position_xy_trajectory_shape_preserved"] = 1
+        if position_xy_alignment_metadata:
+            for key, value in position_xy_alignment_metadata.items():
+                f.attrs[f"position_xy_{key}"] = value
+        if position_z_alignment_metadata:
+            for key, value in position_z_alignment_metadata.items():
+                f.attrs[f"position_z_{key}"] = value
+        if orientation_alignment_metadata:
+            for key, value in orientation_alignment_metadata.items():
+                f.attrs[f"orientation_{key}"] = value
         if mask_metadata:
             for key, value in mask_metadata.items():
                 f.attrs[f"mask_{key}"] = value
 
         g_action = f.create_group("action")
-        g_action.create_dataset("position", data=data["position"].astype(np.float32), **kwargs)
+        action_position_ds = g_action.create_dataset(
+            "position", data=data["position"].astype(np.float32), **kwargs
+        )
+        action_position_ds.attrs["xy_aligned"] = int(position_xy_alignment_metadata is not None)
+        action_position_ds.attrs["xy_preserved"] = int(position_xy_alignment_metadata is None)
+        action_position_ds.attrs["xy_trajectory_shape_preserved"] = 1
+        action_position_ds.attrs["z_aligned"] = int(position_z_alignment_metadata is not None)
+        action_position_ds.attrs["orientation_aligned"] = int(
+            orientation_alignment_metadata is not None
+        )
+        action_position_ds.attrs["orientation_trajectory_shape_preserved"] = 1
         action_force = data["force"].astype(np.float32).copy()
         if zero_action_force_xy:
             action_force[:, :2] = 0.0
@@ -1657,7 +1780,17 @@ def write_episode(
             )
 
         g_obs = f.create_group("observations", track_order=True)
-        g_obs.create_dataset("position", data=data["position"].astype(np.float32), **kwargs)
+        observation_position_ds = g_obs.create_dataset(
+            "position", data=data["position"].astype(np.float32), **kwargs
+        )
+        observation_position_ds.attrs["xy_aligned"] = int(position_xy_alignment_metadata is not None)
+        observation_position_ds.attrs["xy_preserved"] = int(position_xy_alignment_metadata is None)
+        observation_position_ds.attrs["xy_trajectory_shape_preserved"] = 1
+        observation_position_ds.attrs["z_aligned"] = int(position_z_alignment_metadata is not None)
+        observation_position_ds.attrs["orientation_aligned"] = int(
+            orientation_alignment_metadata is not None
+        )
+        observation_position_ds.attrs["orientation_trajectory_shape_preserved"] = 1
         observation_force_ds = g_obs.create_dataset(
             "force", data=data["force"].astype(np.float32), **kwargs
         )
@@ -1738,6 +1871,76 @@ def _resolve_reference_episode_name(ep_names: Sequence[str], requested: str) -> 
     raise KeyError(f"Reference episode {requested!r} not found. Available: {list(ep_names)[:8]}...")
 
 
+def _resolve_contact_index(g_ep: h5py.Group, length: int, attr_name: str) -> int:
+    """Return a validated source-episode contact index used for pose alignment."""
+    key = str(attr_name or "force_contact_on_idx").strip()
+    if not key:
+        raise ValueError("position_z_contact_index_attr must not be empty")
+    if key not in g_ep.attrs:
+        raise KeyError(f"Missing contact-index attribute {key!r} in {g_ep.name}")
+    index = int(g_ep.attrs[key])
+    if index < 0 or index >= int(length):
+        raise ValueError(
+            f"Invalid {key}={index} for {g_ep.name} with position length={int(length)}"
+        )
+    return index
+
+
+def _apply_constant_orientation_alignment(
+    rotvecs: np.ndarray,
+    *,
+    reference_contact_rotvec: np.ndarray,
+    source_contact_rotvec: np.ndarray,
+    residual_scale: float,
+) -> Tuple[np.ndarray, Dict[str, object]]:
+    """Left-compose one SO(3) correction while preserving trajectory shape.
+
+    A fraction ``residual_scale`` of the source-to-reference contact rotation is
+    deliberately retained. Unlike component-wise rotvec addition, matrix
+    composition remains valid when the correction axes differ.
+    """
+    if cv2 is None:
+        raise RuntimeError("OpenCV is required for SO(3) orientation alignment")
+    values = _ensure_2d_min_dim(rotvecs, 3, "orientation_rotvecs")
+    residual = float(residual_scale)
+    if not 0.0 <= residual <= 1.0:
+        raise ValueError(f"orientation residual_scale must be in [0,1], got {residual}")
+
+    ref = np.asarray(reference_contact_rotvec, dtype=np.float64).reshape(3)
+    src = np.asarray(source_contact_rotvec, dtype=np.float64).reshape(3)
+    r_ref, _ = cv2.Rodrigues(ref)
+    r_src, _ = cv2.Rodrigues(src)
+    raw_correction = r_ref @ r_src.T
+    raw_correction_rotvec, _ = cv2.Rodrigues(raw_correction)
+    raw_correction_rotvec = raw_correction_rotvec.reshape(3)
+    applied_correction_rotvec = raw_correction_rotvec * (1.0 - residual)
+    applied_correction, _ = cv2.Rodrigues(applied_correction_rotvec)
+
+    aligned = np.empty((values.shape[0], 3), dtype=np.float32)
+    for frame_index, rotvec in enumerate(values[:, :3]):
+        rotation, _ = cv2.Rodrigues(np.asarray(rotvec, dtype=np.float64))
+        aligned_rotvec, _ = cv2.Rodrigues(applied_correction @ rotation)
+        aligned[frame_index] = aligned_rotvec.reshape(3).astype(np.float32)
+
+    metadata: Dict[str, object] = {
+        "alignment_method": "contact_index_partial_constant_so3_left",
+        "residual_scale": residual,
+        "raw_correction_wx_rad": float(raw_correction_rotvec[0]),
+        "raw_correction_wy_rad": float(raw_correction_rotvec[1]),
+        "raw_correction_wz_rad": float(raw_correction_rotvec[2]),
+        "raw_correction_angle_deg": float(
+            np.linalg.norm(raw_correction_rotvec) * 180.0 / np.pi
+        ),
+        "applied_correction_wx_rad": float(applied_correction_rotvec[0]),
+        "applied_correction_wy_rad": float(applied_correction_rotvec[1]),
+        "applied_correction_wz_rad": float(applied_correction_rotvec[2]),
+        "applied_correction_angle_deg": float(
+            np.linalg.norm(applied_correction_rotvec) * 180.0 / np.pi
+        ),
+    }
+    return aligned, metadata
+
+
 def _parse_episode_indices(value: str) -> List[int]:
     raw = str(value or "").strip()
     if not raw:
@@ -1772,6 +1975,18 @@ def convert_merged_h5(
     include_gripper: bool = False,
     exclude_episode_indices: Sequence[int] = (),
     zero_action_force_xy: bool = False,
+    align_position_xy_to_reference_contact: bool = False,
+    position_xy_reference_episode: str = "ep_0000",
+    position_xy_contact_index_attr: str = "force_contact_on_idx",
+    position_xy_residual_scale: float = 0.10,
+    position_xy_residual_cap_mm: float = 15.0,
+    align_position_z_to_reference_contact: bool = False,
+    position_z_reference_episode: str = "ep_0000",
+    position_z_contact_index_attr: str = "force_contact_on_idx",
+    align_orientation_to_reference_contact: bool = False,
+    orientation_reference_episode: str = "ep_0000",
+    orientation_contact_index_attr: str = "force_contact_on_idx",
+    orientation_residual_scale: float = 0.10,
     stain_mask_mode: str = "auto",
     stain_reference_episode: str = "ep_0000",
     stain_exclude_reference_episode: bool = True,
@@ -1856,6 +2071,9 @@ def convert_merged_h5(
     written: List[Path] = []
     failed: List[Tuple[str, str]] = []
     skipped: List[Tuple[int, str]] = []
+    position_xy_alignment_records: List[Dict[str, object]] = []
+    position_z_alignment_records: List[Dict[str, object]] = []
+    orientation_alignment_records: List[Dict[str, object]] = []
 
     with h5py.File(str(input_h5), "r") as f:
         if "episodes" not in f:
@@ -1871,6 +2089,107 @@ def convert_merged_h5(
                 f"exclude_episode_indices out of range for {len(ep_names)} episodes: {invalid_indices}"
             )
         excluded_set = set(excluded_indices)
+
+        position_xy_reference_ep_name = ""
+        position_xy_reference_contact_index = -1
+        position_xy_reference_contact_mm = np.full(2, np.nan, dtype=np.float64)
+        if align_position_xy_to_reference_contact:
+            residual_scale = float(position_xy_residual_scale)
+            residual_cap_mm = float(position_xy_residual_cap_mm)
+            if not 0.0 <= residual_scale <= 1.0:
+                raise ValueError(
+                    "position_xy_residual_scale must be in [0,1], "
+                    f"got {residual_scale}"
+                )
+            if residual_cap_mm < 0.0:
+                raise ValueError(
+                    "position_xy_residual_cap_mm must be non-negative, "
+                    f"got {residual_cap_mm}"
+                )
+            position_xy_reference_ep_name = _resolve_reference_episode_name(
+                ep_names, position_xy_reference_episode
+            )
+            xy_ref_group = f["episodes"][position_xy_reference_ep_name]
+            xy_ref_position, _ = _read_optional_array(
+                xy_ref_group,
+                ["position", "observations/position"],
+                dtype=np.float32,
+            )
+            if xy_ref_position is None:
+                raise KeyError(f"Missing position in {xy_ref_group.name}")
+            xy_ref_position = _ensure_2d_min_dim(
+                xy_ref_position, 6, "position_xy_reference_position"
+            )
+            position_xy_reference_contact_index = _resolve_contact_index(
+                xy_ref_group,
+                xy_ref_position.shape[0],
+                position_xy_contact_index_attr,
+            )
+            position_xy_reference_contact_mm = np.asarray(
+                xy_ref_position[position_xy_reference_contact_index, :2],
+                dtype=np.float64,
+            )
+
+        position_z_reference_ep_name = ""
+        position_z_reference_contact_index = -1
+        position_z_reference_contact_mm = float("nan")
+        if align_position_z_to_reference_contact:
+            position_z_reference_ep_name = _resolve_reference_episode_name(
+                ep_names, position_z_reference_episode
+            )
+            z_ref_group = f["episodes"][position_z_reference_ep_name]
+            z_ref_position, _ = _read_optional_array(
+                z_ref_group,
+                ["position", "observations/position"],
+                dtype=np.float32,
+            )
+            if z_ref_position is None:
+                raise KeyError(f"Missing position in {z_ref_group.name}")
+            z_ref_position = _ensure_2d_min_dim(
+                z_ref_position, 6, "position_z_reference_position"
+            )
+            position_z_reference_contact_index = _resolve_contact_index(
+                z_ref_group,
+                z_ref_position.shape[0],
+                position_z_contact_index_attr,
+            )
+            position_z_reference_contact_mm = float(
+                z_ref_position[position_z_reference_contact_index, 2]
+            )
+
+        orientation_reference_ep_name = ""
+        orientation_reference_contact_index = -1
+        orientation_reference_contact_rotvec = np.full(3, np.nan, dtype=np.float64)
+        if align_orientation_to_reference_contact:
+            residual = float(orientation_residual_scale)
+            if not 0.0 <= residual <= 1.0:
+                raise ValueError(
+                    "orientation_residual_scale must be in [0,1], "
+                    f"got {residual}"
+                )
+            orientation_reference_ep_name = _resolve_reference_episode_name(
+                ep_names, orientation_reference_episode
+            )
+            orientation_ref_group = f["episodes"][orientation_reference_ep_name]
+            orientation_ref_position, _ = _read_optional_array(
+                orientation_ref_group,
+                ["position", "observations/position"],
+                dtype=np.float32,
+            )
+            if orientation_ref_position is None:
+                raise KeyError(f"Missing position in {orientation_ref_group.name}")
+            orientation_ref_position = _ensure_2d_min_dim(
+                orientation_ref_position, 6, "orientation_reference_position"
+            )
+            orientation_reference_contact_index = _resolve_contact_index(
+                orientation_ref_group,
+                orientation_ref_position.shape[0],
+                orientation_contact_index_attr,
+            )
+            orientation_reference_contact_rotvec = np.asarray(
+                orientation_ref_position[orientation_reference_contact_index, 3:6],
+                dtype=np.float64,
+            )
 
         effective_stain_mode = _resolve_stain_mask_mode(f, stain_mask_mode)
         mask_metadata: Optional[Dict[str, object]] = None
@@ -1914,6 +2233,36 @@ def convert_merged_h5(
         print(f"[INFO] camera_names   = {camera_names}")
         print(f"[INFO] include_gripper= {int(bool(include_gripper))}")
         print(f"[INFO] action_fxy_zero= {int(bool(zero_action_force_xy))}")
+        print(f"[INFO] position_xy_align= {int(bool(align_position_xy_to_reference_contact))}")
+        if align_position_xy_to_reference_contact:
+            print(
+                "[INFO] position_xy_ref  = "
+                f"{position_xy_reference_ep_name}, "
+                f"{position_xy_contact_index_attr}={position_xy_reference_contact_index}, "
+                f"contact_xy={position_xy_reference_contact_mm.tolist()}mm, "
+                f"residual_scale={float(position_xy_residual_scale):.3f}, "
+                f"residual_cap={float(position_xy_residual_cap_mm):.3f}mm"
+            )
+        print(f"[INFO] position_z_align= {int(bool(align_position_z_to_reference_contact))}")
+        if align_position_z_to_reference_contact:
+            print(
+                "[INFO] position_z_ref  = "
+                f"{position_z_reference_ep_name}, "
+                f"{position_z_contact_index_attr}={position_z_reference_contact_index}, "
+                f"contact_z={position_z_reference_contact_mm:.6f}mm"
+            )
+        print(
+            f"[INFO] orientation_align= "
+            f"{int(bool(align_orientation_to_reference_contact))}"
+        )
+        if align_orientation_to_reference_contact:
+            print(
+                "[INFO] orientation_ref = "
+                f"{orientation_reference_ep_name}, "
+                f"{orientation_contact_index_attr}={orientation_reference_contact_index}, "
+                f"contact_rotvec={orientation_reference_contact_rotvec.tolist()}rad, "
+                f"residual_scale={float(orientation_residual_scale):.3f}"
+            )
         print(f"[INFO] episodes found = {len(ep_names)}")
         print(f"[INFO] excluded idx   = {excluded_indices}")
         print(f"[INFO] stain_mode     = {effective_stain_mode}")
@@ -2068,6 +2417,124 @@ def convert_merged_h5(
                             )
                     data.update(artifacts)
 
+                position_xy_alignment_metadata: Optional[Dict[str, object]] = None
+                if align_position_xy_to_reference_contact:
+                    source_contact_index = _resolve_contact_index(
+                        f["episodes"][ep_name],
+                        data["position"].shape[0],
+                        position_xy_contact_index_attr,
+                    )
+                    source_contact_xy_mm = np.asarray(
+                        data["position"][source_contact_index, :2], dtype=np.float64
+                    )
+                    raw_delta_mm = source_contact_xy_mm - position_xy_reference_contact_mm
+                    residual_delta_mm = np.clip(
+                        raw_delta_mm * float(position_xy_residual_scale),
+                        -float(position_xy_residual_cap_mm),
+                        float(position_xy_residual_cap_mm),
+                    )
+                    xy_offset_mm = -raw_delta_mm + residual_delta_mm
+                    aligned_position = data["position"].astype(np.float32).copy()
+                    aligned_position[:, :2] += xy_offset_mm.astype(np.float32)
+                    data["position"] = aligned_position
+                    position_xy_alignment_metadata = {
+                        "alignment_method": "contact_index_partial_constant_offset",
+                        "reference_episode": str(position_xy_reference_ep_name),
+                        "contact_index_attr": str(position_xy_contact_index_attr),
+                        "reference_contact_index": int(position_xy_reference_contact_index),
+                        "reference_contact_x_mm": float(position_xy_reference_contact_mm[0]),
+                        "reference_contact_y_mm": float(position_xy_reference_contact_mm[1]),
+                        "source_contact_index": int(source_contact_index),
+                        "source_contact_x_mm": float(source_contact_xy_mm[0]),
+                        "source_contact_y_mm": float(source_contact_xy_mm[1]),
+                        "raw_delta_x_mm": float(raw_delta_mm[0]),
+                        "raw_delta_y_mm": float(raw_delta_mm[1]),
+                        "residual_scale": float(position_xy_residual_scale),
+                        "residual_cap_mm": float(position_xy_residual_cap_mm),
+                        "residual_delta_x_mm": float(residual_delta_mm[0]),
+                        "residual_delta_y_mm": float(residual_delta_mm[1]),
+                        "offset_x_mm": float(xy_offset_mm[0]),
+                        "offset_y_mm": float(xy_offset_mm[1]),
+                    }
+
+                position_z_alignment_metadata: Optional[Dict[str, object]] = None
+                if align_position_z_to_reference_contact:
+                    source_contact_index = _resolve_contact_index(
+                        f["episodes"][ep_name],
+                        data["position"].shape[0],
+                        position_z_contact_index_attr,
+                    )
+                    source_contact_mm = float(data["position"][source_contact_index, 2])
+                    z_offset_mm = float(position_z_reference_contact_mm - source_contact_mm)
+                    aligned_position = data["position"].astype(np.float32).copy()
+                    aligned_position[:, 2] += np.float32(z_offset_mm)
+                    data["position"] = aligned_position
+                    position_z_alignment_metadata = {
+                        "alignment_method": "contact_index_constant_offset",
+                        "reference_episode": str(position_z_reference_ep_name),
+                        "contact_index_attr": str(position_z_contact_index_attr),
+                        "reference_contact_index": int(position_z_reference_contact_index),
+                        "reference_contact_mm": float(position_z_reference_contact_mm),
+                        "source_contact_index": int(source_contact_index),
+                        "source_contact_mm": float(source_contact_mm),
+                        "offset_mm": float(z_offset_mm),
+                    }
+
+                orientation_alignment_metadata: Optional[Dict[str, object]] = None
+                if align_orientation_to_reference_contact:
+                    source_contact_index = _resolve_contact_index(
+                        f["episodes"][ep_name],
+                        data["position"].shape[0],
+                        orientation_contact_index_attr,
+                    )
+                    source_contact_rotvec = np.asarray(
+                        data["position"][source_contact_index, 3:6], dtype=np.float64
+                    )
+                    aligned_rotvecs, correction_metadata = (
+                        _apply_constant_orientation_alignment(
+                            data["position"][:, 3:6],
+                            reference_contact_rotvec=orientation_reference_contact_rotvec,
+                            source_contact_rotvec=source_contact_rotvec,
+                            residual_scale=orientation_residual_scale,
+                        )
+                    )
+                    aligned_position = data["position"].astype(np.float32).copy()
+                    aligned_position[:, 3:6] = aligned_rotvecs
+                    data["position"] = aligned_position
+
+                    reference_rotation, _ = cv2.Rodrigues(
+                        orientation_reference_contact_rotvec.astype(np.float64)
+                    )
+                    corrected_contact_rotation, _ = cv2.Rodrigues(
+                        aligned_rotvecs[source_contact_index].astype(np.float64)
+                    )
+                    residual_rotation = reference_rotation @ corrected_contact_rotation.T
+                    residual_rotvec, _ = cv2.Rodrigues(residual_rotation)
+                    orientation_alignment_metadata = {
+                        "reference_episode": str(orientation_reference_ep_name),
+                        "contact_index_attr": str(orientation_contact_index_attr),
+                        "reference_contact_index": int(
+                            orientation_reference_contact_index
+                        ),
+                        "reference_contact_wx_rad": float(
+                            orientation_reference_contact_rotvec[0]
+                        ),
+                        "reference_contact_wy_rad": float(
+                            orientation_reference_contact_rotvec[1]
+                        ),
+                        "reference_contact_wz_rad": float(
+                            orientation_reference_contact_rotvec[2]
+                        ),
+                        "source_contact_index": int(source_contact_index),
+                        "source_contact_wx_rad": float(source_contact_rotvec[0]),
+                        "source_contact_wy_rad": float(source_contact_rotvec[1]),
+                        "source_contact_wz_rad": float(source_contact_rotvec[2]),
+                        **correction_metadata,
+                        "residual_error_angle_deg": float(
+                            np.linalg.norm(residual_rotvec) * 180.0 / np.pi
+                        ),
+                    }
+
                 orig_len = int(data["position"].shape[0])
                 if orig_len < int(min_len):
                     raise RuntimeError(f"too short: T={orig_len} < min_len={min_len}")
@@ -2086,7 +2553,40 @@ def convert_merged_h5(
                     truncated=truncated,
                     zero_action_force_xy=zero_action_force_xy,
                     mask_metadata=mask_metadata,
+                    position_xy_alignment_metadata=position_xy_alignment_metadata,
+                    position_z_alignment_metadata=position_z_alignment_metadata,
+                    orientation_alignment_metadata=orientation_alignment_metadata,
                 )
+
+                if position_xy_alignment_metadata is not None:
+                    position_xy_alignment_records.append(
+                        {
+                            "output_episode": int(out_idx),
+                            "source_index": int(ep_index),
+                            "source_episode": str(ep_name),
+                            **position_xy_alignment_metadata,
+                        }
+                    )
+
+                if position_z_alignment_metadata is not None:
+                    position_z_alignment_records.append(
+                        {
+                            "output_episode": int(out_idx),
+                            "source_index": int(ep_index),
+                            "source_episode": str(ep_name),
+                            **position_z_alignment_metadata,
+                        }
+                    )
+
+                if orientation_alignment_metadata is not None:
+                    orientation_alignment_records.append(
+                        {
+                            "output_episode": int(out_idx),
+                            "source_index": int(ep_index),
+                            "source_episode": str(ep_name),
+                            **orientation_alignment_metadata,
+                        }
+                    )
 
                 image_items = [f"{cam}={data[cam].shape}" for cam in camera_names]
                 if "stain_mask" in data:
@@ -2098,6 +2598,24 @@ def convert_merged_h5(
                 print(
                     f"[OK] {ep_name} -> episode_{out_idx}.hdf5 | "
                     f"T={T_out}, position={data['position'].shape}, force={data['force'].shape}, {image_shapes}"
+                    + (
+                        ", xy_offset=("
+                        f"{float(position_xy_alignment_metadata['offset_x_mm']):+.3f},"
+                        f"{float(position_xy_alignment_metadata['offset_y_mm']):+.3f})mm"
+                        if position_xy_alignment_metadata is not None
+                        else ""
+                    )
+                    + (
+                        f", z_offset={float(position_z_alignment_metadata['offset_mm']):+.3f}mm"
+                        if position_z_alignment_metadata is not None
+                        else ""
+                    )
+                    + (
+                        ", orientation_correction="
+                        f"{float(orientation_alignment_metadata['applied_correction_angle_deg']):.3f}deg"
+                        if orientation_alignment_metadata is not None
+                        else ""
+                    )
                 )
                 written.append(out_path)
                 out_idx += 1
@@ -2106,6 +2624,24 @@ def convert_merged_h5(
                 msg = f"{type(exc).__name__}: {exc}"
                 failed.append((ep_name, msg))
                 print(f"[FAIL] {ep_name}: {msg}")
+
+    image_debug_paths: List[Path] = []
+    if written and "cam0" in camera_names:
+        try:
+            image_debug_paths = list(
+                write_ep0_dino_image_debug(
+                    written[0],
+                    output_dir,
+                    reference_width=int(tcp_roi_reference_width),
+                    reference_height=int(tcp_roi_reference_height),
+                    center_x=int(tcp_roi_center_x),
+                    center_y=int(tcp_roi_center_y),
+                    area_fraction=float(tcp_roi_area_fraction),
+                    patch_size=16,
+                )
+            )
+        except Exception as exc:
+            print(f"[WARN] failed to write ep0 DINO image debug PNGs: {type(exc).__name__}: {exc}")
 
     if write_summary:
         summary_path = output_dir / "conversion_summary.json"
@@ -2128,6 +2664,77 @@ def convert_merged_h5(
                     "include_gripper": bool(include_gripper),
                     "action_force_xy_zeroed": bool(zero_action_force_xy),
                     "observation_force_xy_preserved": True,
+                    "position_xy_preserved": not bool(
+                        align_position_xy_to_reference_contact
+                    ),
+                    "position_xy_trajectory_shape_preserved": True,
+                    "position_xy_alignment_enabled": bool(
+                        align_position_xy_to_reference_contact
+                    ),
+                    "position_xy_alignment_method": (
+                        "contact_index_partial_constant_offset"
+                        if align_position_xy_to_reference_contact
+                        else "none"
+                    ),
+                    "position_xy_reference_episode": str(position_xy_reference_ep_name),
+                    "position_xy_contact_index_attr": str(position_xy_contact_index_attr),
+                    "position_xy_reference_contact_index": int(
+                        position_xy_reference_contact_index
+                    ),
+                    "position_xy_reference_contact_mm": (
+                        position_xy_reference_contact_mm.tolist()
+                        if align_position_xy_to_reference_contact
+                        else None
+                    ),
+                    "position_xy_residual_scale": float(position_xy_residual_scale),
+                    "position_xy_residual_cap_mm": float(position_xy_residual_cap_mm),
+                    "position_xy_alignment_records": position_xy_alignment_records,
+                    "position_z_alignment_enabled": bool(
+                        align_position_z_to_reference_contact
+                    ),
+                    "position_z_alignment_method": (
+                        "contact_index_constant_offset"
+                        if align_position_z_to_reference_contact
+                        else "none"
+                    ),
+                    "position_z_reference_episode": str(position_z_reference_ep_name),
+                    "position_z_contact_index_attr": str(position_z_contact_index_attr),
+                    "position_z_reference_contact_index": int(
+                        position_z_reference_contact_index
+                    ),
+                    "position_z_reference_contact_mm": (
+                        float(position_z_reference_contact_mm)
+                        if align_position_z_to_reference_contact
+                        else None
+                    ),
+                    "position_z_alignment_records": position_z_alignment_records,
+                    "orientation_alignment_enabled": bool(
+                        align_orientation_to_reference_contact
+                    ),
+                    "orientation_alignment_method": (
+                        "contact_index_partial_constant_so3_left"
+                        if align_orientation_to_reference_contact
+                        else "none"
+                    ),
+                    "orientation_trajectory_shape_preserved": True,
+                    "orientation_reference_episode": str(
+                        orientation_reference_ep_name
+                    ),
+                    "orientation_contact_index_attr": str(
+                        orientation_contact_index_attr
+                    ),
+                    "orientation_reference_contact_index": int(
+                        orientation_reference_contact_index
+                    ),
+                    "orientation_reference_contact_rotvec_rad": (
+                        orientation_reference_contact_rotvec.tolist()
+                        if align_orientation_to_reference_contact
+                        else None
+                    ),
+                    "orientation_residual_scale": float(
+                        orientation_residual_scale
+                    ),
+                    "orientation_alignment_records": orientation_alignment_records,
                     "stain_mask_mode": effective_stain_mode,
                     "tcp_roi_reference_width": int(tcp_roi_reference_width),
                     "tcp_roi_reference_height": int(tcp_roi_reference_height),
@@ -2138,6 +2745,7 @@ def convert_merged_h5(
                     "tcp_roi_x1": int(tcp_roi_x1),
                     "tcp_roi_y0": int(tcp_roi_y0),
                     "tcp_roi_y1": int(tcp_roi_y1),
+                    "dino_image_debug_paths": [str(p) for p in image_debug_paths],
                     "stain_reference_episode": reference_ep_name,
                     "stain_reference_max_pose_dist": float(stain_reference_max_pose_dist),
                     "stain_reference_top_k": int(stain_reference_top_k),
@@ -2246,6 +2854,92 @@ def build_parser(
         dest="zero_action_force_xy",
         action="store_false",
         help="Keep measured Fx,Fy in both action/force and observations/force (legacy behavior).",
+    )
+    parser.add_argument(
+        "--align_position_xy_to_reference_contact",
+        action="store_true",
+        default=False,
+        help=(
+            "Apply one constant XY offset per episode to reduce its contact-point "
+            "difference from the reference while retaining a configurable residual. "
+            "The within-episode XY trajectory shape is preserved."
+        ),
+    )
+    parser.add_argument(
+        "--position_xy_reference_episode",
+        type=str,
+        default="ep_0000",
+        help="Source episode whose contact XY defines the partial-alignment center.",
+    )
+    parser.add_argument(
+        "--position_xy_contact_index_attr",
+        type=str,
+        default="force_contact_on_idx",
+        help="Source episode attribute containing the contact-frame index for XY alignment.",
+    )
+    parser.add_argument(
+        "--position_xy_residual_scale",
+        type=float,
+        default=0.10,
+        help="Fraction of each original contact XY offset retained after alignment (default: 0.10).",
+    )
+    parser.add_argument(
+        "--position_xy_residual_cap_mm",
+        type=float,
+        default=15.0,
+        help="Per-axis cap for the retained contact XY offset in mm (default: 15).",
+    )
+    parser.add_argument(
+        "--align_position_z_to_reference_contact",
+        action="store_true",
+        default=False,
+        help=(
+            "Apply one constant Z offset per episode so its contact-index Z matches "
+            "the reference episode. X/Y and the within-episode Z trajectory are preserved."
+        ),
+    )
+    parser.add_argument(
+        "--position_z_reference_episode",
+        type=str,
+        default="ep_0000",
+        help="Source episode whose contact Z defines the aligned coordinate level.",
+    )
+    parser.add_argument(
+        "--position_z_contact_index_attr",
+        type=str,
+        default="force_contact_on_idx",
+        help="Source episode attribute containing the contact-frame index.",
+    )
+    parser.add_argument(
+        "--align_orientation_to_reference_contact",
+        action="store_true",
+        default=False,
+        help=(
+            "Apply one constant SO(3) rotation per episode so its contact "
+            "orientation approaches the reference while preserving the "
+            "within-episode orientation trajectory."
+        ),
+    )
+    parser.add_argument(
+        "--orientation_reference_episode",
+        type=str,
+        default="ep_0000",
+        help="Source episode whose contact orientation defines the reference.",
+    )
+    parser.add_argument(
+        "--orientation_contact_index_attr",
+        type=str,
+        default="force_contact_on_idx",
+        help="Source episode attribute containing the contact-frame index.",
+    )
+    parser.add_argument(
+        "--orientation_residual_scale",
+        type=float,
+        default=0.10,
+        help=(
+            "Fraction of the original source-to-reference contact rotation "
+            "retained after SO(3) alignment (default: 0.10)."
+        ),
     )
     parser.add_argument(
         "--include_gripper",
@@ -2611,8 +3305,10 @@ def run_cli(
     default_root: Path,
     camera_names: Sequence[str],
     include_gripper: bool = False,
+    default_stain_mask_mode: str = "auto",
 ) -> None:
     parser = build_parser(description, default_root, camera_names, include_gripper=include_gripper)
+    parser.set_defaults(stain_mask_mode=str(default_stain_mask_mode))
     args = parser.parse_args()
 
     input_h5 = resolve_input_h5(args.input_h5, Path(args.dataset_root))
@@ -2630,6 +3326,24 @@ def run_cli(
         include_gripper=bool(args.include_gripper),
         exclude_episode_indices=args.exclude_episode_indices,
         zero_action_force_xy=bool(args.zero_action_force_xy),
+        align_position_xy_to_reference_contact=bool(
+            args.align_position_xy_to_reference_contact
+        ),
+        position_xy_reference_episode=str(args.position_xy_reference_episode),
+        position_xy_contact_index_attr=str(args.position_xy_contact_index_attr),
+        position_xy_residual_scale=float(args.position_xy_residual_scale),
+        position_xy_residual_cap_mm=float(args.position_xy_residual_cap_mm),
+        align_position_z_to_reference_contact=bool(
+            args.align_position_z_to_reference_contact
+        ),
+        position_z_reference_episode=str(args.position_z_reference_episode),
+        position_z_contact_index_attr=str(args.position_z_contact_index_attr),
+        align_orientation_to_reference_contact=bool(
+            args.align_orientation_to_reference_contact
+        ),
+        orientation_reference_episode=str(args.orientation_reference_episode),
+        orientation_contact_index_attr=str(args.orientation_contact_index_attr),
+        orientation_residual_scale=float(args.orientation_residual_scale),
         stain_mask_mode=str(args.stain_mask_mode),
         stain_reference_episode=str(args.stain_reference_episode),
         stain_exclude_reference_episode=not bool(args.keep_stain_reference_episode),

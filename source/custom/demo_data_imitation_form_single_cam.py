@@ -9,14 +9,10 @@ Output HDF5 layout:
   observations/position
   observations/force
   observations/images/cam0
-  observations/images/stain_mask, optional
 
-If the merged HDF5 was recorded with hdf5_recorder_single_cam_stain_mask,
-episode_0 is treated as a clean surface reference by default and is used to
-generate stain_mask for the remaining episodes.
-
-Use --stain_mask_mode tcp_roi to write a persistent fixed TCP interaction ROI
-for every frame, including clean episode_0.
+The single-camera DINOv3 pipeline stores RGB only. Its fixed TCP interaction
+ROI is generated inside the image encoder from calibrated pixel coordinates,
+so no per-frame stain_mask dataset is written by default.
 """
 
 from __future__ import annotations
@@ -29,6 +25,7 @@ def main() -> None:
         description="Convert single-camera merged HDF5 into compact imitation-form episodes.",
         default_root=DATASETS_ROOT / "polishing" / "single_cam",
         camera_names=("cam0",),
+        default_stain_mask_mode="none",
     )
 
 

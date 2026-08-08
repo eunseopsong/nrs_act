@@ -42,11 +42,13 @@ You can still override any parameter with --ros-args -p name:=value.
 import os
 import sys
 import time
+import csv
 import math
 import pickle
 import threading
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional, Deque, List, Tuple
 from enum import Enum
 
@@ -65,6 +67,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 from geometry_msgs.msg import Wrench
 from std_msgs.msg import Float32, Float64MultiArray, Int32
 from sensor_msgs.msg import Image
+from std_srvs.srv import Trigger
 
 
 DEFAULT_ACT_ROOT = os.path.expanduser("~/nrs_imitation")
@@ -174,6 +177,8 @@ def _policy_to_ckpt_subdir(policy_class: str) -> str:
         return "act"
     if p == "DIFFUSION":
         return "diffusion"
+    if p == "BSPLINE":
+        return "bspline"
     return "flow"
 
 
@@ -1063,8 +1068,14 @@ class NodeCmdMotionInfer(Node):
         # -----------------------------
         self.declare_parameter("ckpt_dir", "")  # empty -> auto latest checkpoint
         self.declare_parameter("act_root", DEFAULT_ACT_ROOT)
-        self.declare_parameter("policy_class", "FLOW")  # ACT | DIFFUSION | FLOW
+        self.declare_parameter("policy_class", "FLOW")  # ACT | DIFFUSION | FLOW | BSPLINE
         self.declare_parameter("ckpt_auto_subdir", "polishing")
+
+        # Optional per-run CSV metrics log, so runs on different policy_class
+        # values (e.g. FLOW vs BSPLINE) can be compared offline afterwards.
+        self.declare_parameter("metrics_log_enable", False)
+        self.declare_parameter("metrics_log_dir", "")  # empty -> <act_root>/logs/inference_metrics
+        self.declare_parameter("metrics_run_tag", "")
         self.declare_parameter("obs_mode", "single_cam")  # single_cam | dual_cam
         self.declare_parameter("camera_names", "auto")    # auto | "cam0" | "cam0,cam1"
         self.declare_parameter("phase_mode", "pure")  # kept for recommended Flow command compatibility
@@ -1077,6 +1088,14 @@ class NodeCmdMotionInfer(Node):
         self.declare_parameter("global_image_topic", "/realsense/global/color/image_raw")
         self.declare_parameter("stain_mask_topic", "")
         self.declare_parameter("cmd_topic", "/ur10skku/cmdMotion")
+        # Read-only model diagnostics: load the checkpoint and process live
+        # observations, but do not create a robot-command publisher or control
+        # timer. Only visualization publishers and the inference timer remain.
+        self.declare_parameter("visualization_only", False)
+        # Minimal FLOW executor: keep model trajectory replay, command-rate
+        # smoothing, contact measurement, and command-envelope safety, while
+        # bypassing the legacy ACT-era stall/kick/dither/recovery machinery.
+        self.declare_parameter("clean_flow_execution", False)
 
         self.declare_parameter("image_qos", "best_effort")
 
@@ -1122,6 +1141,45 @@ class NodeCmdMotionInfer(Node):
         )
         self.declare_parameter("modality_importance_log_every_n", 5)
 
+        # FLOW trajectory/vector diagnostic. This is deliberately independent
+        # from Grad-CAM: it draws the raw, denormalized absolute XYZ trajectory
+        # inferred from the current observation over the local-camera image.
+        # With flow_diagnostic_only enabled, the periodic control loop publishes
+        # no robot commands. A bounded move is possible only through the explicit
+        # Trigger service below.
+        self.declare_parameter("flow_vector_overlay_enable", False)
+        self.declare_parameter(
+            "flow_vector_overlay_topic", "/inference_core/flow_vector_overlay"
+        )
+        self.declare_parameter("flow_vector_overlay_horizons", "1,5,15,30,60,127")
+        self.declare_parameter("flow_vector_overlay_selected_horizon", 30)
+        self.declare_parameter("flow_vector_overlay_tcp_center_x", 253)
+        self.declare_parameter("flow_vector_overlay_tcp_center_y", 120)
+        self.declare_parameter("flow_vector_overlay_pixels_per_mm", 2.0)
+        # Eye-in-hand camera: the tool tip barely moves in-frame when the tool
+        # moves (camera moves with it), so a single isotropic px/mm scalar
+        # aligned to image X/Y is wrong in general. This 2x2 matrix maps
+        # predicted tool-frame (dx_mm, dy_mm) to image (du_px, dv_px):
+        #   du = m_du_dx * dx_mm + m_du_dy * dy_mm
+        #   dv = m_dv_dx * dx_mm + m_dv_dy * dy_mm
+        # Defaults below were empirically calibrated on 2026-08-08 for the
+        # 250mm/45deg mount by jogging the robot +10mm along tool X then tool
+        # Y and template-matching background (workpiece) patches between
+        # frames to measure how far the scene panned -- not by tracking the
+        # tool tip, which stays ~fixed in-frame on this eye-in-hand rig.
+        # Re-calibrate the same way whenever the mount geometry changes.
+        self.declare_parameter("flow_vector_overlay_m_du_dx", 0.0)
+        self.declare_parameter("flow_vector_overlay_m_du_dy", 0.65)
+        self.declare_parameter("flow_vector_overlay_m_dv_dx", 0.45)
+        self.declare_parameter("flow_vector_overlay_m_dv_dy", 0.0)
+        self.declare_parameter("flow_diagnostic_only", False)
+        self.declare_parameter("flow_step_service_enable", False)
+        self.declare_parameter("flow_step_service", "/inference_core/flow_step")
+        self.declare_parameter("flow_step_max_xyz_mm", 0.5)
+        self.declare_parameter("flow_step_max_rot_rad", 0.001)
+        self.declare_parameter("flow_step_stats_margin_mm", 10.0)
+        self.declare_parameter("flow_step_block_down_on_contact", True)
+
         self.declare_parameter("control_hz", 125.0)
         self.declare_parameter("infer_hz", 5.0)
 
@@ -1130,6 +1188,13 @@ class NodeCmdMotionInfer(Node):
         # temporal aggregation for ACT/Diffusion checkpoints.
         self.declare_parameter("action_selection_mode", "auto")  # auto | trajectory_interp | temporal_agg
         self.declare_parameter("trajectory_hz", 30.0)
+        # FLOW executor controls. The legacy path regenerated at infer_hz and
+        # translated every absolute trajectory so step zero matched the current
+        # pose. At 5 Hz inference / 30 Hz replay, that repeatedly consumed only
+        # the first ~6 steps. Preserve the learned absolute frame and keep each
+        # plan alive for a meaningful horizon instead.
+        self.declare_parameter("flow_local_anchor_enable", False)
+        self.declare_parameter("flow_replan_interval_steps", 30)
 
         # -----------------------------
         # New observation encoder / force history
@@ -1164,6 +1229,10 @@ class NodeCmdMotionInfer(Node):
         self.declare_parameter("contact_on_thr", 3.0)
         self.declare_parameter("contact_off_thr", 1.2)
         self.declare_parameter("clear_plans_on_contact_change", False)
+        # For the current flat-surface task, stop pose-Z descent at first
+        # contact. Normal loading remains available through action Fz.
+        self.declare_parameter("contact_z_descent_block_enable", True)
+        self.declare_parameter("contact_z_descent_margin_mm", 0.2)
 
         # touch detection
         self.declare_parameter("touch_fz_thr", 0.5)
@@ -1201,6 +1270,16 @@ class NodeCmdMotionInfer(Node):
         self.declare_parameter("resize_hw", 0)
         self.declare_parameter("debug_every_n", 30)
 
+        # Temporary ablation for calibration-corrupted orientation labels.
+        # When enabled, measured/predicted orientation is ignored: policy qpos,
+        # demo-start alignment, and final robot commands all use the fixed
+        # world-Z 90-degree rotation vector below. XYZ, force, force history, and images
+        # remain live.
+        self.declare_parameter("orientation_lock_enable", False)
+        self.declare_parameter("orientation_lock_wx", 0.0)
+        self.declare_parameter("orientation_lock_wy", 0.0)
+        self.declare_parameter("orientation_lock_wz", 1.5707963268)
+
         # Force-command upper limit. Values <= 0 disable only the upper limit;
         # the final command remains non-negative.
         self.declare_parameter("fz_hard_limit", 30.0)
@@ -1216,6 +1295,15 @@ class NodeCmdMotionInfer(Node):
         # Refuse automatic demo-start moves that are too far from the live robot pose.
         # Use <=0 only when an external safety layer already constrains this motion.
         self.declare_parameter("demo_start_max_align_dist_mm", 75.0)
+        # The alignment trajectory uses smoothstep interpolation, whose peak
+        # speed is 1.5 * distance / duration.  Stretch long moves so they do
+        # not become faster just because the start pose is far away.
+        self.declare_parameter("demo_start_max_xyz_speed_mm_s", 50.0)
+        self.declare_parameter("demo_start_max_rot_speed_rad_s", 0.25)
+        # Policy inference starts only after the measured TCP, not merely the
+        # commanded trajectory, has settled near the demonstration start.
+        self.declare_parameter("demo_start_position_tolerance_mm", 5.0)
+        self.declare_parameter("demo_start_rotation_tolerance_rad", 0.05)
 
         # Optional policy-output Z offset.
         # This is applied to every denormalized absolute action z target.
@@ -1245,6 +1333,17 @@ class NodeCmdMotionInfer(Node):
         self.declare_parameter("image_resize_hw", 256)
         self.declare_parameter("image_pool_hw", 4)
         self.declare_parameter("pretrained_backbone", True)
+        self.declare_parameter("image_backbone", "dinov3")
+        self.declare_parameter("dino_model_name", "vit_small_patch16_dinov3.lvd1689m")
+        self.declare_parameter("dino_checkpoint_path", "")
+        self.declare_parameter("freeze_image_backbone", True)
+        self.declare_parameter("dino_roi_pooling", "attention")
+        self.declare_parameter("use_tcp_roi", True)
+        self.declare_parameter("tcp_roi_reference_width", 424)
+        self.declare_parameter("tcp_roi_reference_height", 240)
+        self.declare_parameter("tcp_roi_center_x", 253)
+        self.declare_parameter("tcp_roi_center_y", 120)
+        self.declare_parameter("tcp_roi_area_fraction", 0.10)
 
         # diffusion policy config
         self.declare_parameter("diffusion_train_steps", 100)
@@ -1356,6 +1455,9 @@ class NodeCmdMotionInfer(Node):
         self.act_root = os.path.expanduser(str(self.get_parameter("act_root").value))
         self.policy_class = str(self.get_parameter("policy_class").value).strip().upper()
         self.ckpt_auto_subdir = str(self.get_parameter("ckpt_auto_subdir").value).strip()
+        self.metrics_log_enable = bool(self.get_parameter("metrics_log_enable").value)
+        self.metrics_log_dir = str(self.get_parameter("metrics_log_dir").value).strip()
+        self.metrics_run_tag = str(self.get_parameter("metrics_run_tag").value).strip()
         self.obs_mode = str(self.get_parameter("obs_mode").value).strip().lower()
         if self.obs_mode == "dual":
             self.obs_mode = "dual_cam"
@@ -1375,6 +1477,12 @@ class NodeCmdMotionInfer(Node):
         self.global_image_topic = str(self.get_parameter("global_image_topic").value)
         self.stain_mask_topic = str(self.get_parameter("stain_mask_topic").value).strip()
         self.cmd_topic = str(self.get_parameter("cmd_topic").value)
+        self.visualization_only = bool(
+            self.get_parameter("visualization_only").value
+        )
+        self.clean_flow_execution = bool(
+            self.get_parameter("clean_flow_execution").value
+        )
 
         self.image_qos_str = str(self.get_parameter("image_qos").value)
         self.camera_preprocess_mode = str(self.get_parameter("camera_preprocess_mode").value).strip().lower()
@@ -1454,18 +1562,102 @@ class NodeCmdMotionInfer(Node):
             maxlen=self.modality_importance_history_len
         )
 
+        self.flow_vector_overlay_enable = bool(
+            self.get_parameter("flow_vector_overlay_enable").value
+        )
+        self.flow_vector_overlay_topic = str(
+            self.get_parameter("flow_vector_overlay_topic").value
+        ).strip()
+        raw_horizons = str(
+            self.get_parameter("flow_vector_overlay_horizons").value
+        ).strip()
+        try:
+            self.flow_vector_overlay_horizons = sorted(
+                set(max(0, int(x.strip())) for x in raw_horizons.split(",") if x.strip())
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "flow_vector_overlay_horizons must be comma-separated integers"
+            ) from exc
+        if not self.flow_vector_overlay_horizons:
+            self.flow_vector_overlay_horizons = [1, 5, 15, 30, 60, 127]
+        self.flow_vector_overlay_selected_horizon = max(
+            0, int(self.get_parameter("flow_vector_overlay_selected_horizon").value)
+        )
+        self.flow_vector_overlay_tcp_center_x = int(
+            self.get_parameter("flow_vector_overlay_tcp_center_x").value
+        )
+        self.flow_vector_overlay_tcp_center_y = int(
+            self.get_parameter("flow_vector_overlay_tcp_center_y").value
+        )
+        self.flow_vector_overlay_pixels_per_mm = max(
+            0.01, float(self.get_parameter("flow_vector_overlay_pixels_per_mm").value)
+        )
+        self.flow_vector_overlay_m_du_dx = float(
+            self.get_parameter("flow_vector_overlay_m_du_dx").value
+        )
+        self.flow_vector_overlay_m_du_dy = float(
+            self.get_parameter("flow_vector_overlay_m_du_dy").value
+        )
+        self.flow_vector_overlay_m_dv_dx = float(
+            self.get_parameter("flow_vector_overlay_m_dv_dx").value
+        )
+        self.flow_vector_overlay_m_dv_dy = float(
+            self.get_parameter("flow_vector_overlay_m_dv_dy").value
+        )
+        self.flow_diagnostic_only = bool(
+            self.get_parameter("flow_diagnostic_only").value
+        )
+        self.flow_step_service_enable = bool(
+            self.get_parameter("flow_step_service_enable").value
+        )
+        self.flow_step_service = str(
+            self.get_parameter("flow_step_service").value
+        ).strip()
+        self.flow_step_max_xyz_mm = max(
+            0.0, float(self.get_parameter("flow_step_max_xyz_mm").value)
+        )
+        self.flow_step_max_rot_rad = max(
+            0.0, float(self.get_parameter("flow_step_max_rot_rad").value)
+        )
+        self.flow_step_stats_margin_mm = max(
+            0.0, float(self.get_parameter("flow_step_stats_margin_mm").value)
+        )
+        self.flow_step_block_down_on_contact = bool(
+            self.get_parameter("flow_step_block_down_on_contact").value
+        )
+        if self.flow_vector_overlay_enable and not self.flow_vector_overlay_topic:
+            raise RuntimeError("flow_vector_overlay_topic must be non-empty when enabled")
+        if self.flow_step_service_enable and not self.flow_step_service:
+            raise RuntimeError("flow_step_service must be non-empty when enabled")
+        if self.flow_step_service_enable and not self.flow_diagnostic_only:
+            raise RuntimeError(
+                "flow_step_service_enable requires flow_diagnostic_only=true so automatic "
+                "control and manual stepping cannot run together"
+            )
+
         self.control_hz = float(self.get_parameter("control_hz").value)
         self.infer_hz = float(self.get_parameter("infer_hz").value)
 
         self.action_selection_mode = str(self.get_parameter("action_selection_mode").value).strip().lower()
         self.trajectory_hz = max(1e-6, float(self.get_parameter("trajectory_hz").value))
         if self.action_selection_mode == "auto":
-            self.action_selection_mode = "trajectory_interp" if self.policy_class == "FLOW" else "temporal_agg"
+            # FLOW and BSPLINE both emit a full time-indexed trajectory in one
+            # forward pass, so replaying it via interpolation fits both.
+            self.action_selection_mode = (
+                "trajectory_interp" if self.policy_class in ("FLOW", "BSPLINE") else "temporal_agg"
+            )
         if self.action_selection_mode not in ("trajectory_interp", "temporal_agg"):
             raise RuntimeError(
                 "action_selection_mode must be auto, trajectory_interp, or temporal_agg, "
                 f"got: {self.action_selection_mode}"
             )
+        self.flow_local_anchor_enable = bool(
+            self.get_parameter("flow_local_anchor_enable").value
+        )
+        self.flow_replan_interval_steps = max(
+            0, int(self.get_parameter("flow_replan_interval_steps").value)
+        )
         self.use_force_history = bool(self.get_parameter("use_force_history").value)
         self.force_history_len = int(self.get_parameter("force_history_len").value)
 
@@ -1492,6 +1684,12 @@ class NodeCmdMotionInfer(Node):
         self.contact_on_thr = float(self.get_parameter("contact_on_thr").value)
         self.contact_off_thr = float(self.get_parameter("contact_off_thr").value)
         self.clear_plans_on_contact_change = bool(self.get_parameter("clear_plans_on_contact_change").value)
+        self.contact_z_descent_block_enable = bool(
+            self.get_parameter("contact_z_descent_block_enable").value
+        )
+        self.contact_z_descent_margin_mm = max(
+            0.0, float(self.get_parameter("contact_z_descent_margin_mm").value)
+        )
 
         self.touch_fz_thr = float(self.get_parameter("touch_fz_thr").value)
         self.touch_ok_count = int(self.get_parameter("touch_ok_count").value)
@@ -1527,6 +1725,20 @@ class NodeCmdMotionInfer(Node):
         self.resize_hw = int(self.get_parameter("resize_hw").value)
         self.debug_every_n = max(1, int(self.get_parameter("debug_every_n").value))
 
+        self.orientation_lock_enable = bool(
+            self.get_parameter("orientation_lock_enable").value
+        )
+        self.orientation_lock_rotvec = np.asarray(
+            [
+                float(self.get_parameter("orientation_lock_wx").value),
+                float(self.get_parameter("orientation_lock_wy").value),
+                float(self.get_parameter("orientation_lock_wz").value),
+            ],
+            dtype=np.float32,
+        )
+        if not np.all(np.isfinite(self.orientation_lock_rotvec)):
+            raise RuntimeError("orientation_lock_wx/wy/wz must all be finite")
+
         self.fz_hard_limit = float(self.get_parameter("fz_hard_limit").value)
 
         self.auto_move_to_demo_start = bool(self.get_parameter("auto_move_to_demo_start").value)
@@ -1534,6 +1746,18 @@ class NodeCmdMotionInfer(Node):
         self.demo_start_hold_sec = float(self.get_parameter("demo_start_hold_sec").value)
         self.demo_start_z_offset_mm = float(self.get_parameter("demo_start_z_offset_mm").value)
         self.demo_start_max_align_dist_mm = float(self.get_parameter("demo_start_max_align_dist_mm").value)
+        self.demo_start_max_xyz_speed_mm_s = max(
+            0.0, float(self.get_parameter("demo_start_max_xyz_speed_mm_s").value)
+        )
+        self.demo_start_max_rot_speed_rad_s = max(
+            0.0, float(self.get_parameter("demo_start_max_rot_speed_rad_s").value)
+        )
+        self.demo_start_position_tolerance_mm = max(
+            0.0, float(self.get_parameter("demo_start_position_tolerance_mm").value)
+        )
+        self.demo_start_rotation_tolerance_rad = max(
+            0.0, float(self.get_parameter("demo_start_rotation_tolerance_rad").value)
+        )
         self.policy_z_offset_mm = float(self.get_parameter("policy_z_offset_mm").value)
         self.cmd_safety_enable = bool(self.get_parameter("cmd_safety_enable").value)
         self.cmd_safety_max_xyz_from_current_mm = float(self.get_parameter("cmd_safety_max_xyz_from_current_mm").value)
@@ -1620,6 +1844,17 @@ class NodeCmdMotionInfer(Node):
         self.flow_kernel_size = int(self.get_parameter("flow_kernel_size").value)
         self.flow_n_groups = int(self.get_parameter("flow_n_groups").value)
         self.flow_cond_predict_scale = bool(self.get_parameter("flow_cond_predict_scale").value)
+        self.image_backbone = str(self.get_parameter("image_backbone").value)
+        self.dino_model_name = str(self.get_parameter("dino_model_name").value)
+        self.dino_checkpoint_path = str(self.get_parameter("dino_checkpoint_path").value)
+        self.freeze_image_backbone = bool(self.get_parameter("freeze_image_backbone").value)
+        self.dino_roi_pooling = str(self.get_parameter("dino_roi_pooling").value)
+        self.use_tcp_roi = bool(self.get_parameter("use_tcp_roi").value)
+        self.tcp_roi_reference_width = int(self.get_parameter("tcp_roi_reference_width").value)
+        self.tcp_roi_reference_height = int(self.get_parameter("tcp_roi_reference_height").value)
+        self.tcp_roi_center_x = int(self.get_parameter("tcp_roi_center_x").value)
+        self.tcp_roi_center_y = int(self.get_parameter("tcp_roi_center_y").value)
+        self.tcp_roi_area_fraction = float(self.get_parameter("tcp_roi_area_fraction").value)
 
         self.use_stain_mask = bool(self.get_parameter("use_stain_mask").value)
         self.stain_mask_key = str(self.get_parameter("stain_mask_key").value)
@@ -1711,8 +1946,8 @@ class NodeCmdMotionInfer(Node):
         # validate paths / resolve checkpoint
         if not self.act_root or not os.path.isdir(self.act_root):
             raise RuntimeError(f"act_root invalid: {self.act_root}")
-        if self.policy_class not in ("ACT", "DIFFUSION", "FLOW"):
-            raise RuntimeError(f"policy_class must be ACT, DIFFUSION, or FLOW, got: {self.policy_class}")
+        if self.policy_class not in ("ACT", "DIFFUSION", "FLOW", "BSPLINE"):
+            raise RuntimeError(f"policy_class must be ACT, DIFFUSION, FLOW, or BSPLINE, got: {self.policy_class}")
         if self.flow_deterministic_noise and self.policy_class != "FLOW":
             self.get_logger().warn(
                 f"[FLOW-NOISE] deterministic noise requested for policy_class={self.policy_class}; ignored."
@@ -1802,6 +2037,17 @@ class NodeCmdMotionInfer(Node):
                 )
                 self.auto_move_to_demo_start = False
             else:
+                if self.orientation_lock_enable:
+                    original_demo_rotvec = self.demo_start_pose6[3:6].copy()
+                    self.demo_start_pose6[3:6] = self.orientation_lock_rotvec
+                    self.get_logger().warn(
+                        "[ORIENTATION-LOCK] enabled: measured orientation observation and "
+                        "predicted orientation command will be ignored; "
+                        f"fixed rotvec="
+                        f"{np.array2string(self.orientation_lock_rotvec, precision=7, separator=', ')}; "
+                        f"demo-start rotvec changed from "
+                        f"{np.array2string(original_demo_rotvec, precision=7, separator=', ')}"
+                    )
                 align_target = self.demo_start_pose6.astype(np.float32).copy()
                 align_target[2] += float(self.demo_start_z_offset_mm)
                 self.get_logger().info(
@@ -1817,6 +2063,7 @@ class NodeCmdMotionInfer(Node):
         # policy
         self.policy = self._load_policy_and_ckpt_from_act_root()
         self._setup_gradcam_hooks()
+        self._setup_metrics_logger()
 
         # -----------------------------
         # State buffers
@@ -1859,11 +2106,19 @@ class NodeCmdMotionInfer(Node):
         self._cmd_safety_latched = False
         self._cmd_safety_latch_reason = ""
         self._demo_start_safety_last_log = 0.0
+        self._demo_start_wait_last_log = 0.0
         self._last_gripper_cmd: Optional[int] = None
         self._last_gripper_cmd_t: Optional[float] = None
         self._gripper_startup_position: Optional[float] = None
         self._gripper_cmd_safety_last_log = 0.0
         self._last_gripper_goal_current_mA: Optional[float] = None
+        self._latest_flow_raw_seq: Optional[np.ndarray] = None
+        self._latest_flow_pose6: Optional[np.ndarray] = None
+        self._latest_flow_force3: Optional[np.ndarray] = None
+        self._latest_flow_plan_t: float = 0.0
+        self._flow_vector_overlay_count = 0
+        self._flow_vector_overlay_fail_count = 0
+        self._flow_step_count = 0
 
         # baseline state
         self._sent_first_cmd = False
@@ -1879,10 +2134,13 @@ class NodeCmdMotionInfer(Node):
         self._demo_start_align_t0: Optional[float] = None
         self._demo_start_hold_t0: Optional[float] = None
         self._demo_start_from_pose6: Optional[np.ndarray] = None
+        self._demo_start_effective_move_sec: Optional[float] = None
 
         # contact state
         self._contact = False
         self._last_contact = False
+        self._contact_z_floor_mm: Optional[float] = None
+        self._contact_z_block_count = 0
 
         self.stage = Stage.APPROACH
 
@@ -1958,8 +2216,9 @@ class NodeCmdMotionInfer(Node):
         self.pub_cmd = None
         self.pub_gripper_cmd = None
         self.pub_gripper_goal_current = None
-        self.pub_cmd = self.create_publisher(Float64MultiArray, self.cmd_topic, 10)
-        if self.use_gripper:
+        if not self.visualization_only:
+            self.pub_cmd = self.create_publisher(Float64MultiArray, self.cmd_topic, 10)
+        if self.use_gripper and not self.visualization_only:
             self.pub_gripper_cmd = self.create_publisher(Int32, self.gripper_command_topic, 10)
             self.pub_gripper_goal_current = self.create_publisher(
                 Float32,
@@ -1985,8 +2244,43 @@ class NodeCmdMotionInfer(Node):
                 f"[MODALITY] publishing standalone dashboard: {self.modality_importance_topic}"
             )
 
-        self.timer_control = self.create_timer(self.dt_control, self._on_control_timer)
+        self.pub_flow_vector_overlay = None
+        if self.flow_vector_overlay_enable:
+            flow_overlay_qos = _qos(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+            self.pub_flow_vector_overlay = self.create_publisher(
+                Image, self.flow_vector_overlay_topic, flow_overlay_qos
+            )
+            self.get_logger().info(
+                f"[FLOW-VECTOR] publishing local-camera overlay: "
+                f"{self.flow_vector_overlay_topic}"
+            )
+
+        self.srv_flow_step = None
+        if self.flow_step_service_enable:
+            self.srv_flow_step = self.create_service(
+                Trigger, self.flow_step_service, self._on_flow_step_service
+            )
+            self.get_logger().warn(
+                f"[FLOW-STEP] manual service enabled: {self.flow_step_service}; "
+                f"max_xyz={self.flow_step_max_xyz_mm:.3f}mm, "
+                f"max_rot={self.flow_step_max_rot_rad:.6f}rad, automatic_control=OFF"
+            )
+
+        self.timer_control = None
+        if not self.visualization_only:
+            self.timer_control = self.create_timer(self.dt_control, self._on_control_timer)
         self.timer_infer = self.create_timer(self.dt_infer, self._on_infer_timer)
+
+        if self.visualization_only:
+            self.get_logger().warn(
+                "[VISUALIZATION-ONLY] command publisher/control timer disabled; "
+                "this node cannot move the robot"
+            )
+        elif self.clean_flow_execution:
+            self.get_logger().warn(
+                "[CLEAN-FLOW] legacy stall/kick/dither/recovery control is bypassed; "
+                "trajectory replay, smoothing, contact monitoring, and command safety remain active"
+            )
 
         self.get_logger().info(
             "[INFO] ✅ Ready.\n"
@@ -2015,7 +2309,13 @@ class NodeCmdMotionInfer(Node):
             f"  action_selection={self.action_selection_mode} trajectory_hz={self.trajectory_hz:.3f} "
             f"temporal_agg={int(self.use_temporal_agg)} mode={self.temporal_agg_mode} "
             f"tau_steps={self.temporal_agg_tau_steps} max_plans={self.max_plans}\n"
+            f"  FLOW_EXECUTOR(local_anchor={int(self.flow_local_anchor_enable)}, "
+            f"replan_steps={self.flow_replan_interval_steps}, "
+            f"replan_sec={self.flow_replan_interval_steps / self.trajectory_hz:.3f}, "
+            f"clean={int(self.clean_flow_execution)})\n"
             f"  contact_gate(on={self.contact_on_thr}, off={self.contact_off_thr}) clear_on_change={int(self.clear_plans_on_contact_change)}\n"
+            f"  CONTACT_Z_BLOCK(enable={int(self.contact_z_descent_block_enable)}, "
+            f"margin_mm={self.contact_z_descent_margin_mm:.3f})\n"
             f"  force_xy_cmd(enable={int(self.force_xy_cmd_enable)}, hard_limit={self.force_xy_hard_limit}N)\n"
             f"  force_z_cmd(upper_limit={fz_limit_desc}, nonnegative=1)\n"
             f"  touch(delta={int(self.touch_use_delta)}, thr={self.touch_fz_thr}, ok={self.touch_ok_count}, min_after={self.touch_min_after_start_sec}s, base_tau={self.touch_baseline_tau_sec}s)\n"
@@ -2025,8 +2325,13 @@ class NodeCmdMotionInfer(Node):
             f"  RECOVER(removed)\n"
             f"  DITHER(enable={int(self.dither_enable)}, only_track={int(self.dither_only_track)}, min_after={self.dither_min_after_start_sec}s, win={self.dither_win_sec}s, dur={self.dither_sec}s, net_pos_thr={self.dither_net_pos_thr_mm}mm, ratio_thr={self.dither_path_ratio_thr}, rms_pos_thr={self.dither_rms_pos_thr_mm}mm)\n"
             f"  RELEASE(enable={int(self.release_assist_enable)}, ramp_sec={self.release_ramp_sec})\n"
-            f"  DEMO_START(auto={int(self.auto_move_to_demo_start)}, move_sec={self.demo_start_move_sec}, hold_sec={self.demo_start_hold_sec}, z_offset_mm={self.demo_start_z_offset_mm})\n"
-            f"  DEMO_START_SAFETY(max_align_dist_mm={self.demo_start_max_align_dist_mm})\n"
+            f"  DEMO_START(auto={int(self.auto_move_to_demo_start)}, min_move_sec={self.demo_start_move_sec}, "
+            f"hold_sec={self.demo_start_hold_sec}, z_offset_mm={self.demo_start_z_offset_mm}, "
+            f"max_xyz_speed={self.demo_start_max_xyz_speed_mm_s}mm/s, "
+            f"max_rot_speed={self.demo_start_max_rot_speed_rad_s}rad/s, "
+            f"pos_tol={self.demo_start_position_tolerance_mm}mm, "
+            f"rot_tol={self.demo_start_rotation_tolerance_rad}rad)\n"
+            f"  DEMO_START_SAFETY(max_align_dist_mm={self.demo_start_max_align_dist_mm}; <=0 disables total-distance gate)\n"
             f"  POLICY_OUTPUT(z_offset_mm={self.policy_z_offset_mm})\n"
             f"  CMD_SAFETY(enable={int(self.cmd_safety_enable)}, max_xyz_from_current_mm={self.cmd_safety_max_xyz_from_current_mm}, "
             f"start_xy_mm={self.cmd_safety_max_xy_from_start_mm}, "
@@ -2037,6 +2342,20 @@ class NodeCmdMotionInfer(Node):
             f"  MODALITY(enable={int(self.modality_importance_enable)}, target={self.modality_importance_target}, "
             f"step={self.modality_importance_target_step}, horizon={self.modality_importance_target_horizon}, "
             f"every_n_infer={self.modality_importance_every_n_infer}, topic={self.modality_importance_topic})\n"
+            f"  FLOW_VECTOR(enable={int(self.flow_vector_overlay_enable)}, "
+            f"topic={self.flow_vector_overlay_topic}, "
+            f"horizons={self.flow_vector_overlay_horizons}, "
+            f"selected={self.flow_vector_overlay_selected_horizon}, "
+            f"projection=calibrated_linear(du_dx={self.flow_vector_overlay_m_du_dx:.3f},"
+            f"du_dy={self.flow_vector_overlay_m_du_dy:.3f},"
+            f"dv_dx={self.flow_vector_overlay_m_dv_dx:.3f},"
+            f"dv_dy={self.flow_vector_overlay_m_dv_dy:.3f}))\n"
+            f"  FLOW_DIAGNOSTIC_ONLY(enable={int(self.flow_diagnostic_only)}, "
+            f"manual_step={int(self.flow_step_service_enable)}, "
+            f"service={self.flow_step_service})\n"
+            f"  ORIENTATION_LOCK(enable={int(self.orientation_lock_enable)}, "
+            f"source=fixed_z90, "
+            f"rotvec={np.array2string(self.orientation_lock_rotvec, precision=7, separator=', ')})\n"
         )
 
     def destroy_node(self):
@@ -2047,7 +2366,82 @@ class NodeCmdMotionInfer(Node):
             and worker is not threading.current_thread()
         ):
             worker.join(timeout=2.0)
+        metrics_file = getattr(self, "_metrics_csv_file", None)
+        if metrics_file is not None:
+            try:
+                metrics_file.close()
+            except Exception:
+                pass
         return super().destroy_node()
+
+    # ------------------------------------------------------------
+    # Cross-policy comparison: per-tick CSV metrics log
+    # ------------------------------------------------------------
+    def _setup_metrics_logger(self):
+        """Optionally record one CSV row per published command.
+
+        Used to compare policy_class runs (e.g. FLOW vs BSPLINE) offline with
+        scripts/compare_policy_runs.py: same task, same topics, one CSV per run.
+        """
+        self._metrics_csv_file = None
+        self._metrics_csv_writer = None
+        self._metrics_t0 = _monotonic()
+        if not self.metrics_log_enable:
+            return
+        log_dir = self.metrics_log_dir or os.path.join(self.act_root, "logs", "inference_metrics")
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            tag = f"_{self.metrics_run_tag}" if self.metrics_run_tag else ""
+            fname = f"{self.policy_class.lower()}{tag}_{ts}.csv"
+            path = os.path.join(log_dir, fname)
+            self._metrics_csv_file = open(path, "w", newline="")
+            self._metrics_csv_writer = csv.writer(self._metrics_csv_file)
+            self._metrics_csv_writer.writerow([
+                "t_wall", "t_elapsed_sec", "stage", "policy_class", "ckpt_dir",
+                "meas_x_mm", "meas_y_mm", "meas_z_mm", "meas_rx", "meas_ry", "meas_rz",
+                "meas_fx_N", "meas_fy_N", "meas_fz_N",
+                "cmd_x_mm", "cmd_y_mm", "cmd_z_mm", "cmd_rx", "cmd_ry", "cmd_rz",
+                "cmd_fx_N", "cmd_fy_N", "cmd_fz_N",
+                "contact", "cmd_safety_blocked",
+            ])
+            self._metrics_csv_file.flush()
+            self.get_logger().info(f"[METRICS] logging per-tick comparison CSV -> {path}")
+        except Exception as e:
+            self.get_logger().error(f"[METRICS] failed to open metrics log: {e}")
+            self._metrics_csv_file = None
+            self._metrics_csv_writer = None
+
+    def _log_metrics_row(self, cmd9: np.ndarray, blocked: bool):
+        if self._metrics_csv_writer is None:
+            return
+        try:
+            with self._lock:
+                pose6 = None if self._pose6 is None else self._pose6.copy()
+                force = None if self._force is None else self._force.copy()
+            meas6 = pose6.astype(np.float32).tolist() if pose6 is not None else [float("nan")] * 6
+            f3 = (
+                self._extract_force3(force).astype(np.float32).tolist()
+                if force is not None and force.size >= 3
+                else [float("nan")] * 3
+            )
+            cmd = np.asarray(cmd9, dtype=np.float32).reshape(-1)[:9].tolist()
+            self._metrics_csv_writer.writerow([
+                time.time(),
+                _monotonic() - self._metrics_t0,
+                self.stage.name,
+                self.policy_class,
+                self.ckpt_dir,
+                *meas6,
+                *f3,
+                *cmd,
+                int(bool(self._contact)),
+                int(bool(blocked)),
+            ])
+            self._metrics_csv_file.flush()
+        except Exception as e:
+            self.get_logger().error(f"[METRICS] failed to log row: {e}")
+            self._metrics_csv_writer = None
 
     # ------------------------------------------------------------
     # Small helpers (force extraction / history)
@@ -2889,6 +3283,338 @@ class NodeCmdMotionInfer(Node):
                 self.policy.train()
 
 
+    def _render_flow_vector_overlay_rgb(
+        self,
+        *,
+        rgb: np.ndarray,
+        pose6: np.ndarray,
+        force3: np.ndarray,
+        seq_raw: np.ndarray,
+    ) -> np.ndarray:
+        """Draw current-observation FLOW XYZ directions on the local image.
+
+        This is a direction diagnostic, not a full 3-D projection. Base-frame
+        displacements are rotated into the current TCP/tool frame, then the
+        tool X/Y components are mapped to image pixels via a 2x2 linear
+        matrix (flow_vector_overlay_m_*) and drawn at the configured TCP
+        pixel. The camera is eye-in-hand, so the tool tip itself barely moves
+        in-frame; the matrix is calibrated from how much the background
+        (workpiece) pans per mm of tool motion, not from tool-tip tracking.
+        """
+        if cv2 is None:
+            raise RuntimeError("OpenCV is required for FLOW vector overlay")
+
+        image = np.asarray(rgb).copy()
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise RuntimeError(f"FLOW overlay RGB must be (H,W,3), got {image.shape}")
+        if image.dtype != np.uint8:
+            image = np.clip(image, 0, 255).astype(np.uint8)
+
+        pose = np.asarray(pose6, dtype=np.float32).reshape(-1)
+        sequence = np.asarray(seq_raw, dtype=np.float32)
+        if pose.size < 6 or sequence.ndim != 2 or sequence.shape[1] < 9:
+            raise RuntimeError(
+                f"invalid FLOW overlay pose/sequence: pose={pose.shape}, seq={sequence.shape}"
+            )
+
+        height, width = image.shape[:2]
+        cx = int(np.clip(self.flow_vector_overlay_tcp_center_x, 0, width - 1))
+        cy = int(np.clip(self.flow_vector_overlay_tcp_center_y, 0, height - 1))
+        m_du_dx = float(self.flow_vector_overlay_m_du_dx)
+        m_du_dy = float(self.flow_vector_overlay_m_du_dy)
+        m_dv_dx = float(self.flow_vector_overlay_m_dv_dx)
+        m_dv_dy = float(self.flow_vector_overlay_m_dv_dy)
+
+        # TCP-centered square ROI used by this checkpoint (10% image area).
+        roi_side = max(1, int(round(math.sqrt(0.10 * float(width * height)))))
+        roi_x0 = int(np.clip(cx - roi_side // 2, 0, max(0, width - roi_side)))
+        roi_y0 = int(np.clip(cy - roi_side // 2, 0, max(0, height - roi_side)))
+        cv2.rectangle(
+            image,
+            (roi_x0, roi_y0),
+            (min(width - 1, roi_x0 + roi_side), min(height - 1, roi_y0 + roi_side)),
+            (255, 80, 80),
+            1,
+            cv2.LINE_AA,
+        )
+
+        rotation_base_tool, _ = cv2.Rodrigues(pose[3:6].astype(np.float64))
+        rotation_tool_base = rotation_base_tool.T
+        max_radius_px = max(20.0, 0.42 * float(min(width, height)))
+        palette = [
+            (70, 180, 255),
+            (80, 235, 180),
+            (255, 215, 70),
+            (255, 145, 55),
+            (235, 85, 170),
+            (185, 105, 255),
+        ]
+
+        valid_horizons = [
+            min(max(0, int(h)), sequence.shape[0] - 1)
+            for h in self.flow_vector_overlay_horizons
+        ]
+        selected = min(
+            max(0, int(self.flow_vector_overlay_selected_horizon)), sequence.shape[0] - 1
+        )
+        if selected not in valid_horizons:
+            valid_horizons.append(selected)
+
+        selected_delta_base = sequence[selected, :3] - pose[:3]
+        selected_delta_tool = rotation_tool_base @ selected_delta_base.astype(np.float64)
+
+        for arrow_i, horizon in enumerate(valid_horizons):
+            delta_base = sequence[horizon, :3] - pose[:3]
+            delta_tool = rotation_tool_base @ delta_base.astype(np.float64)
+            dx_mm = float(delta_tool[0])
+            dy_mm = float(delta_tool[1])
+            du = m_du_dx * dx_mm + m_du_dy * dy_mm
+            dv = m_dv_dx * dx_mm + m_dv_dy * dy_mm
+            radius = float(math.hypot(du, dv))
+            if radius > max_radius_px:
+                scale = max_radius_px / max(radius, 1e-9)
+                du *= scale
+                dv *= scale
+            end_x = int(np.clip(round(cx + du), 0, width - 1))
+            end_y = int(np.clip(round(cy + dv), 0, height - 1))
+            is_selected = horizon == selected
+            color = (255, 245, 40) if is_selected else palette[arrow_i % len(palette)]
+            thickness = 3 if is_selected else 1
+            cv2.arrowedLine(
+                image,
+                (cx, cy),
+                (end_x, end_y),
+                color,
+                thickness,
+                cv2.LINE_AA,
+                tipLength=0.18,
+            )
+            cv2.putText(
+                image,
+                f"h{horizon}",
+                (min(width - 35, end_x + 3), max(12, end_y - 3)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+
+        cv2.drawMarker(
+            image,
+            (cx, cy),
+            (255, 255, 255),
+            markerType=cv2.MARKER_CROSS,
+            markerSize=13,
+            thickness=2,
+            line_type=cv2.LINE_AA,
+        )
+
+        target = sequence[selected]
+        fz_measured = float(force3[2]) if np.asarray(force3).size >= 3 else float("nan")
+        ood = False
+        if (
+            self.stats is not None
+            and self.stats.act_mode in ("minmax_01", "minmax_m11")
+            and self.stats.act_a.size >= 3
+        ):
+            lo = np.asarray(self.stats.act_a[:3], dtype=np.float32)
+            hi = np.asarray(self.stats.act_b[:3], dtype=np.float32)
+            ood = bool(np.any(target[:3] < lo) or np.any(target[:3] > hi))
+
+        panel_h = min(height, 72)
+        panel = image[:panel_h].copy()
+        image[:panel_h] = np.clip(
+            0.40 * panel.astype(np.float32), 0, 255
+        ).astype(np.uint8)
+        lines = [
+            "FLOW XYZ VECTOR | TOOL-XY PROXY | AUTO CMD: OFF"
+            if (self.flow_diagnostic_only or self.visualization_only)
+            else "FLOW XYZ VECTOR | TOOL-XY PROXY",
+            (
+                f"h={selected} dBASE=[{selected_delta_base[0]:+.2f},"
+                f"{selected_delta_base[1]:+.2f},{selected_delta_base[2]:+.2f}]mm "
+                f"|d|={np.linalg.norm(selected_delta_base):.2f}mm"
+            ),
+            (
+                f"dTOOL=[{selected_delta_tool[0]:+.2f},{selected_delta_tool[1]:+.2f},"
+                f"{selected_delta_tool[2]:+.2f}]mm predFz={target[8]:+.2f}N "
+                f"measFz={fz_measured:+.2f}N OOD={int(ood)}"
+            ),
+        ]
+        for line_i, line in enumerate(lines):
+            cv2.putText(
+                image,
+                line,
+                (7, 18 + line_i * 22),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.43,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+        return image
+
+    def _publish_flow_vector_overlay(
+        self,
+        *,
+        rgb: np.ndarray,
+        pose6: np.ndarray,
+        force3: np.ndarray,
+        seq_raw: np.ndarray,
+    ) -> bool:
+        if not self.flow_vector_overlay_enable or self.pub_flow_vector_overlay is None:
+            return False
+        try:
+            overlay = self._render_flow_vector_overlay_rgb(
+                rgb=rgb,
+                pose6=pose6,
+                force3=force3,
+                seq_raw=seq_raw,
+            )
+            msg = _rgb_numpy_to_image_msg(
+                overlay,
+                stamp=self.get_clock().now().to_msg(),
+                frame_id="flow_vector_tool_xy_proxy",
+            )
+            self.pub_flow_vector_overlay.publish(msg)
+            self._flow_vector_overlay_count += 1
+            if self._flow_vector_overlay_count <= 3 or self._flow_vector_overlay_count % 20 == 0:
+                selected = min(
+                    self.flow_vector_overlay_selected_horizon, seq_raw.shape[0] - 1
+                )
+                delta = seq_raw[selected, :3] - pose6[:3]
+                self.get_logger().info(
+                    f"[FLOW-VECTOR] #{self._flow_vector_overlay_count} h={selected} "
+                    f"delta_xyz=[{delta[0]:+.3f},{delta[1]:+.3f},{delta[2]:+.3f}]mm "
+                    f"pred_fz={seq_raw[selected,8]:+.3f}N"
+                )
+            return True
+        except Exception as exc:
+            self._flow_vector_overlay_fail_count += 1
+            if self._flow_vector_overlay_fail_count <= 3:
+                self.get_logger().warn(
+                    f"[FLOW-VECTOR] overlay failed #{self._flow_vector_overlay_fail_count}: {exc}"
+                )
+            return False
+
+    def _on_flow_step_service(self, request, response):
+        del request
+        if not self.flow_diagnostic_only:
+            response.success = False
+            response.message = "refused: flow_diagnostic_only is false"
+            return response
+        if self.pub_cmd is None:
+            response.success = False
+            response.message = "refused: motion-command publisher is unavailable"
+            return response
+
+        with self._lock:
+            pose6 = None if self._pose6 is None else self._pose6.copy()
+            force = None if self._force is None else self._force.copy()
+        seq = None if self._latest_flow_raw_seq is None else self._latest_flow_raw_seq.copy()
+        plan_age = _monotonic() - float(self._latest_flow_plan_t)
+        if pose6 is None or force is None or seq is None:
+            response.success = False
+            response.message = "refused: waiting for pose, force, image, mask, and FLOW plan"
+            return response
+        if plan_age > max(1.0, 3.0 * self.dt_infer):
+            response.success = False
+            response.message = f"refused: latest FLOW plan is stale ({plan_age:.2f}s)"
+            return response
+
+        selected = min(
+            max(0, int(self.flow_vector_overlay_selected_horizon)), seq.shape[0] - 1
+        )
+        raw_target6 = seq[selected, :6].astype(np.float32)
+        if not np.all(np.isfinite(pose6[:6])) or not np.all(np.isfinite(raw_target6)):
+            response.success = False
+            response.message = "refused: current or predicted pose contains NaN/Inf"
+            return response
+        delta_xyz = raw_target6[:3] - pose6[:3]
+        if self.orientation_lock_enable:
+            delta_rot = self.orientation_lock_rotvec - pose6[3:6]
+        else:
+            delta_rot = raw_target6[3:6] - pose6[3:6]
+
+        xyz_norm = float(np.linalg.norm(delta_xyz))
+        if self.flow_step_max_xyz_mm <= 0.0:
+            delta_xyz[:] = 0.0
+        elif xyz_norm > self.flow_step_max_xyz_mm:
+            delta_xyz = delta_xyz * np.float32(self.flow_step_max_xyz_mm / xyz_norm)
+        rot_norm = float(np.linalg.norm(delta_rot))
+        if not self.orientation_lock_enable:
+            if self.flow_step_max_rot_rad <= 0.0:
+                delta_rot[:] = 0.0
+            elif rot_norm > self.flow_step_max_rot_rad:
+                delta_rot = delta_rot * np.float32(self.flow_step_max_rot_rad / rot_norm)
+
+        measured_fz = float(force[2]) if force.size >= 3 else 0.0
+        if (
+            self.flow_step_block_down_on_contact
+            and measured_fz >= self.contact_on_thr
+            and float(delta_xyz[2]) < 0.0
+        ):
+            response.success = False
+            response.message = (
+                f"blocked: contact Fz={measured_fz:.2f}N and requested dz={delta_xyz[2]:+.3f}mm"
+            )
+            self.get_logger().warn(f"[FLOW-STEP] {response.message}")
+            return response
+
+        target6 = pose6[:6].astype(np.float32).copy()
+        target6[:3] += delta_xyz
+        if self.orientation_lock_enable:
+            target6[3:6] = self.orientation_lock_rotvec
+        else:
+            target6[3:6] += delta_rot
+
+        if (
+            self.stats is not None
+            and self.stats.act_mode in ("minmax_01", "minmax_m11")
+            and self.stats.act_a.size >= 3
+        ):
+            lo = np.asarray(self.stats.act_a[:3], dtype=np.float32) - self.flow_step_stats_margin_mm
+            hi = np.asarray(self.stats.act_b[:3], dtype=np.float32) + self.flow_step_stats_margin_mm
+            if np.any(pose6[:3] < lo) or np.any(pose6[:3] > hi):
+                response.success = False
+                response.message = (
+                    "refused: current XYZ is outside training envelope + margin; "
+                    f"current={np.array2string(pose6[:3], precision=2)}"
+                )
+                return response
+            if np.any(target6[:3] < lo) or np.any(target6[:3] > hi):
+                response.success = False
+                response.message = (
+                    "refused: bounded step would leave training envelope + margin; "
+                    f"target={np.array2string(target6[:3], precision=2)}"
+                )
+                return response
+
+        command = np.zeros(9, dtype=np.float32)
+        command[:6] = target6
+        # Manual vector diagnosis checks the learned pose field first. Never
+        # inject force targets through the step service.
+        command[6:9] = 0.0
+        published = self._publish_cmd(command)
+        if not np.allclose(published[:6], command[:6], atol=1e-6, rtol=0.0):
+            response.success = False
+            response.message = "blocked by command safety; current-pose hold was published"
+            return response
+
+        self._flow_step_count += 1
+        response.success = True
+        response.message = (
+            f"step#{self._flow_step_count} h={selected} "
+            f"dxyz=[{delta_xyz[0]:+.3f},{delta_xyz[1]:+.3f},{delta_xyz[2]:+.3f}]mm "
+            f"drot_norm={np.linalg.norm(delta_rot):.6f}rad "
+            f"orientation={'locked_z90' if self.orientation_lock_enable else 'policy'} "
+            f"Fz_cmd=0"
+        )
+        self.get_logger().warn(f"[FLOW-STEP] {response.message}")
+        return response
+
+
     # ------------------------------------------------------------
     # Load policy (nrs_imitation/source/models/policy.py) + ckpt
     # ------------------------------------------------------------
@@ -2919,6 +3645,15 @@ class NodeCmdMotionInfer(Node):
                     f"Failed to import FlowRGBPolicy from {act_source}/{flow_module.replace('.', '/')}.py : {e}"
                 )
 
+        try:
+            from models.bspline_core import BSplinePolicy
+        except Exception as e:
+            BSplinePolicy = None
+            if str(self.policy_class).upper() == "BSPLINE":
+                raise RuntimeError(
+                    f"Failed to import BSplinePolicy from {act_source}/models/bspline_core.py : {e}"
+                )
+
         args_override = {
             "kl_weight": float(self.get_parameter("kl_weight").value),
             "num_queries": int(self.chunk_size),
@@ -2940,6 +3675,17 @@ class NodeCmdMotionInfer(Node):
             "image_resize_hw": int(self.get_parameter("image_resize_hw").value),
             "image_pool_hw": int(self.get_parameter("image_pool_hw").value),
             "pretrained_backbone": bool(self.get_parameter("pretrained_backbone").value),
+            "image_backbone": self.image_backbone,
+            "dino_model_name": self.dino_model_name,
+            "dino_checkpoint_path": self.dino_checkpoint_path,
+            "freeze_image_backbone": self.freeze_image_backbone,
+            "dino_roi_pooling": self.dino_roi_pooling,
+            "use_tcp_roi": self.use_tcp_roi,
+            "tcp_roi_reference_width": self.tcp_roi_reference_width,
+            "tcp_roi_reference_height": self.tcp_roi_reference_height,
+            "tcp_roi_center_x": self.tcp_roi_center_x,
+            "tcp_roi_center_y": self.tcp_roi_center_y,
+            "tcp_roi_area_fraction": self.tcp_roi_area_fraction,
 
             # observation encoder config
             "position_dim": self.position_dim,
@@ -2977,7 +3723,69 @@ class NodeCmdMotionInfer(Node):
             "empty_stain_feature_mode": self.empty_stain_feature_mode,
             "stain_mask_threshold": self.stain_mask_threshold,
             "debug_stain_pooling": self.debug_stain_pooling,
+
+            # BSPLINE action head (ignored by ACT/DIFFUSION/FLOW)
+            "num_control_points": 16,
+            "bspline_degree": 3,
+            "bspline_hidden_dim": 256,
+            "bspline_loss_type": "mse",
         }
+
+        # FLOW/BSPLINE checkpoints store their complete image backbone state.
+        # Rebuild the exact architecture from dataset metadata without
+        # downloading the pretrained DINO/ResNet weights again during online
+        # inference.
+        if str(self.policy_class).upper() in ("FLOW", "BSPLINE") and not self.use_gripper:
+            try:
+                stats_obj = _pickle_load_compat(os.path.join(self.ckpt_dir, "dataset_stats.pkl"))
+                ckpt_policy_cfg = dict(stats_obj.get("policy_config", {}))
+            except Exception as exc:
+                raise RuntimeError(f"failed to load {self.policy_class} checkpoint metadata: {exc}")
+            # "num_control_points" only ever appears in a BSPLINE-trained
+            # policy_config. Catch a ckpt_dir/policy_class mismatch here,
+            # loudly, instead of best-effort-loading mismatched weights into
+            # a policy that then drives the robot.
+            ckpt_is_bspline = "num_control_points" in ckpt_policy_cfg
+            if str(self.policy_class).upper() == "BSPLINE" and not ckpt_is_bspline:
+                raise RuntimeError(
+                    f"policy_class=BSPLINE but checkpoint at {self.ckpt_dir} has no "
+                    "'num_control_points' in its saved policy_config -> this does not "
+                    "look like a BSPLINE checkpoint. Pass a matching ckpt_dir."
+                )
+            if str(self.policy_class).upper() == "FLOW" and ckpt_is_bspline:
+                raise RuntimeError(
+                    f"policy_class=FLOW but checkpoint at {self.ckpt_dir} looks like a "
+                    "BSPLINE checkpoint (has 'num_control_points' in policy_config). "
+                    "Pass a matching ckpt_dir."
+                )
+            for key in (
+                "image_backbone",
+                "dino_model_name",
+                "freeze_image_backbone",
+                "dino_roi_pooling",
+                "use_tcp_roi",
+                "tcp_roi_reference_width",
+                "tcp_roi_reference_height",
+                "tcp_roi_center_x",
+                "tcp_roi_center_y",
+                "tcp_roi_area_fraction",
+                "num_control_points",
+                "bspline_degree",
+                "bspline_hidden_dim",
+                "bspline_loss_type",
+            ):
+                if key in ckpt_policy_cfg:
+                    args_override[key] = ckpt_policy_cfg[key]
+            if "use_tcp_roi" not in ckpt_policy_cfg:
+                args_override["use_tcp_roi"] = bool(
+                    ckpt_policy_cfg.get("use_stain_mask", False)
+                )
+            if "image_backbone" not in ckpt_policy_cfg:
+                # Legacy FLOW checkpoints predate the selectable backbone and
+                # were trained with ResNet18.
+                args_override["image_backbone"] = "resnet18"
+            args_override["pretrained_backbone"] = False
+            args_override["dino_checkpoint_path"] = ""
 
         if self.use_gripper:
             try:
@@ -3115,6 +3923,11 @@ class NodeCmdMotionInfer(Node):
             if FlowRGBPolicy is None:
                 raise RuntimeError("FlowRGBPolicy import failed.")
             policy = FlowRGBPolicy(args_override).to(self.device)
+        elif policy_class == "BSPLINE":
+            self.get_logger().info("[INFO] Loading BSplinePolicy from nrs_imitation/source/models/bspline_core.py ...")
+            if BSplinePolicy is None:
+                raise RuntimeError("BSplinePolicy import failed.")
+            policy = BSplinePolicy(args_override).to(self.device)
         else:
             raise RuntimeError(f"Unsupported policy_class: {self.policy_class}")
 
@@ -3459,6 +4272,22 @@ class NodeCmdMotionInfer(Node):
         if self.stage == Stage.PRELOAD:
             return
 
+        # FLOW/BSPLINE produce a time-indexed trajectory, not a one-step action.
+        # Do not replace it every inference tick before the controller has
+        # reached the meaningful part of the plan. A value of zero restores
+        # immediate replanning for comparison.
+        if (
+            not self.visualization_only
+            and self.policy_class in ("FLOW", "BSPLINE")
+            and self.action_selection_mode == "trajectory_interp"
+            and self.flow_replan_interval_steps > 0
+            and self.plans
+        ):
+            plan_age_sec = _monotonic() - float(self.plans[-1].t0)
+            min_plan_age_sec = self.flow_replan_interval_steps / self.trajectory_hz
+            if plan_age_sec < min_plan_age_sec:
+                return
+
         with self._lock:
             pose6 = None if self._pose6 is None else self._pose6.copy()
             force = None if self._force is None else self._force.copy()
@@ -3521,7 +4350,13 @@ class NodeCmdMotionInfer(Node):
 
         f3 = self._extract_force3(force)
 
-        q_np = np.concatenate([pose6[:6], f3], axis=0).astype(np.float32)
+        policy_pose6 = pose6[:6].astype(np.float32).copy()
+        if self.orientation_lock_enable:
+            # Preserve the checkpoint's expected 9-D qpos shape while making
+            # orientation a constant, non-informative channel. Only live XYZ,
+            # force/force history, and images vary during this ablation.
+            policy_pose6[3:6] = self.orientation_lock_rotvec
+        q_np = np.concatenate([policy_pose6, f3], axis=0).astype(np.float32)
         q_t = torch.from_numpy(q_np).unsqueeze(0).to(self.device, dtype=torch.float32)
 
         if self.normalize_qpos_enabled and self.stats is not None:
@@ -3646,8 +4481,26 @@ class NodeCmdMotionInfer(Node):
             self.get_logger().error(f"[INFER] policy forward failed: {e}")
             return
 
+        # Preserve the unanchored, denormalized absolute FLOW output for
+        # vector-field diagnosis and explicit one-step motion. This must happen
+        # before the legacy local trajectory anchor modifies seq_den in-place.
+        self._latest_flow_raw_seq = seq_den.copy()
+        self._latest_flow_pose6 = pose6[:6].astype(np.float32).copy()
+        self._latest_flow_force3 = f3.astype(np.float32).copy()
+        self._latest_flow_plan_t = _monotonic()
+        self._publish_flow_vector_overlay(
+            rgb=cam0,
+            pose6=pose6[:6],
+            force3=f3,
+            seq_raw=self._latest_flow_raw_seq,
+        )
+
         local_anchor_applied = False
-        if self.action_selection_mode == "trajectory_interp" and self.action_type == "absolute":
+        if (
+            self.flow_local_anchor_enable
+            and self.action_selection_mode == "trajectory_interp"
+            and self.action_type == "absolute"
+        ):
             # Receding-horizon local anchoring: every newly generated FLOW
             # trajectory starts at the measured EE pose, while preserving all
             # learned relative motion over its 128-step training time axis.
@@ -3787,6 +4640,7 @@ class NodeCmdMotionInfer(Node):
         if not self.force_xy_cmd_enable:
             cmd[6:8] = 0.0
         published = cmd
+        blocked = False
 
         if self.cmd_safety_enable:
             reason = ""
@@ -3851,10 +4705,12 @@ class NodeCmdMotionInfer(Node):
                         f"latched={int(self._cmd_safety_latched)}. "
                         "Publishing current-pose hold/previous safe command."
                     )
+            blocked = bool(reason)
 
         m = Float64MultiArray()
         m.data = [float(x) for x in published.reshape(-1).tolist()]
         self.pub_cmd.publish(m)
+        self._log_metrics_row(published, blocked)
         return published
 
     def _publish_gripper_command(self, target_tick: float, now_t: float) -> bool:
@@ -4164,6 +5020,7 @@ class NodeCmdMotionInfer(Node):
 
         self._contact = False
         self._last_contact = False
+        self._contact_z_floor_mm = None
         self._touch_ok = 0
 
         self._fz_base = 0.0
@@ -4230,10 +5087,30 @@ class NodeCmdMotionInfer(Node):
             self._demo_start_hold_t0 = None
             self.plans.clear()
             self._anchor_ready = False
+
+            target_for_timing = self.demo_start_pose6.astype(np.float32).copy()
+            target_for_timing[2] += float(self.demo_start_z_offset_mm)
+            pos_dist = float(np.linalg.norm(target_for_timing[0:3] - self._demo_start_from_pose6[0:3]))
+            rot_dist = float(np.linalg.norm(target_for_timing[3:6] - self._demo_start_from_pose6[3:6]))
+            effective_move_sec = max(1e-6, float(self.demo_start_move_sec))
+            # smoothstep ds/dt peaks at 1.5 / duration
+            if self.demo_start_max_xyz_speed_mm_s > 0.0:
+                effective_move_sec = max(
+                    effective_move_sec,
+                    1.5 * pos_dist / self.demo_start_max_xyz_speed_mm_s,
+                )
+            if self.demo_start_max_rot_speed_rad_s > 0.0:
+                effective_move_sec = max(
+                    effective_move_sec,
+                    1.5 * rot_dist / self.demo_start_max_rot_speed_rad_s,
+                )
+            self._demo_start_effective_move_sec = effective_move_sec
             self.get_logger().warn(
                 "[DEMO_START] auto alignment start: current pose -> "
                 "demo_start_pose_mean + world_Z_offset "
-                f"({self.demo_start_z_offset_mm:.3f} mm) over {self.demo_start_move_sec:.2f}s"
+                f"({self.demo_start_z_offset_mm:.3f} mm), "
+                f"distance={pos_dist:.3f}mm/{rot_dist:.4f}rad, "
+                f"duration={effective_move_sec:.2f}s"
             )
             self.get_logger().info(
                 f"[DEMO_START] from={np.array2string(self._demo_start_from_pose6, precision=4, separator=', ')}"
@@ -4247,7 +5124,9 @@ class NodeCmdMotionInfer(Node):
                 f"[DEMO_START] to_lift ={np.array2string(demo_align_target, precision=4, separator=', ')}"
             )
 
-        T = max(1e-6, float(self.demo_start_move_sec))
+        T = self._demo_start_effective_move_sec
+        if T is None:
+            T = max(1e-6, float(self.demo_start_move_sec))
         elapsed = max(0.0, now_t - float(self._demo_start_align_t0))
         tau = float(np.clip(elapsed / T, 0.0, 1.0))
         smooth = float(3.0 * tau * tau - 2.0 * tau * tau * tau)
@@ -4279,14 +5158,43 @@ class NodeCmdMotionInfer(Node):
                 )
             return
 
-        # Hold the final target pose for a short time before policy starts.
+        # Do not start policy inference based only on elapsed command time.
+        # Wait until the measured TCP is inside the target tolerance and stays
+        # there for demo_start_hold_sec.
+        pos_err_now = float(np.linalg.norm(pose6[0:3].astype(np.float32) - target_pose[0:3]))
+        rot_err_now = float(np.linalg.norm(pose6[3:6].astype(np.float32) - target_pose[3:6]))
+        target_reached = (
+            pos_err_now <= self.demo_start_position_tolerance_mm
+            and rot_err_now <= self.demo_start_rotation_tolerance_rad
+        )
+        if not target_reached:
+            self._demo_start_hold_t0 = None
+            now_dbg = _monotonic()
+            if now_dbg - self._demo_start_wait_last_log >= 1.0:
+                self._demo_start_wait_last_log = now_dbg
+                delta_xyz = target_pose[0:3] - pose6[0:3].astype(np.float32)
+                # Previous pos_err/rot_err-only log couldn't distinguish "still
+                # slowly converging" from "genuinely stuck": both print a
+                # similar-looking scalar each second. Per-axis delta plus the
+                # last published command makes that distinguishable at a glance.
+                self.get_logger().warn(
+                    "[DEMO_START] command trajectory finished; waiting for measured TCP: "
+                    f"pos_err={pos_err_now:.3f}mm "
+                    f"(tol={self.demo_start_position_tolerance_mm:.3f}), "
+                    f"rot_err={rot_err_now:.4f}rad "
+                    f"(tol={self.demo_start_rotation_tolerance_rad:.4f}) | "
+                    f"delta_xyz=[{delta_xyz[0]:+.3f},{delta_xyz[1]:+.3f},{delta_xyz[2]:+.3f}]mm "
+                    f"meas_xyz=[{pose6[0]:.3f},{pose6[1]:.3f},{pose6[2]:.3f}] "
+                    f"last_cmd_xyz=[{cmd[0]:.3f},{cmd[1]:.3f},{cmd[2]:.3f}]"
+                )
+            return
+
         if self._demo_start_hold_t0 is None:
             self._demo_start_hold_t0 = now_t
-            pos_err_now = float(np.linalg.norm(pose6[0:3].astype(np.float32) - target_pose[0:3]))
-            rot_err_now = float(np.linalg.norm(pose6[3:6].astype(np.float32) - target_pose[3:6]))
             self.get_logger().warn(
-                f"[DEMO_START] target command reached. hold {self.demo_start_hold_sec:.2f}s "
-                f"(current pos_err={pos_err_now:.3f}mm, rot_err={rot_err_now:.4f}rad)"
+                f"[DEMO_START] measured TCP reached target tolerance. "
+                f"hold {self.demo_start_hold_sec:.2f}s "
+                f"(pos_err={pos_err_now:.3f}mm, rot_err={rot_err_now:.4f}rad)"
             )
 
         if (now_t - float(self._demo_start_hold_t0)) < max(0.0, float(self.demo_start_hold_sec)):
@@ -4294,7 +5202,15 @@ class NodeCmdMotionInfer(Node):
 
         self._reset_after_demo_start_alignment(pose6_now=pose6, cmd9=cmd, now_t=now_t)
         self._demo_start_align_done = True
-        self.get_logger().warn("[DEMO_START] alignment done -> TRACK directly and start normal policy inference")
+        if self.flow_diagnostic_only:
+            self.get_logger().warn(
+                "[DEMO_START] alignment done -> diagnostic inference only; "
+                "automatic policy commands remain OFF"
+            )
+        else:
+            self.get_logger().warn(
+                "[DEMO_START] alignment done -> TRACK directly and start normal policy inference"
+            )
 
     # ------------------------------------------------------------
     # Control timer
@@ -4356,12 +5272,32 @@ class NodeCmdMotionInfer(Node):
             self._run_demo_start_alignment(pose6.astype(np.float32), now_t)
             return
 
+        # Diagnostic mode allows only the one-time, speed-limited alignment
+        # above. Once the measured TCP has settled at demo_start_pose_mean,
+        # periodic policy/force/trajectory commands are disabled. Subsequent
+        # motion is possible only through the explicit /flow_step service.
+        if self.flow_diagnostic_only:
+            return
+
         changed = self._update_contact(meas_fz)
         if changed:
+            if self._contact:
+                self._contact_z_floor_mm = float(pose6[2])
+                self._contact_z_block_count = 0
+            else:
+                self._contact_z_floor_mm = None
             if self.clear_plans_on_contact_change:
                 self.plans.clear()
                 self._anchor_ready = False
-            self.get_logger().warn(f"[CONTACT] changed -> {int(self._contact)} | meas_fz={meas_fz:.3f} | stage={self.stage.name}")
+            z_floor_text = (
+                "none"
+                if self._contact_z_floor_mm is None
+                else f"{self._contact_z_floor_mm:.3f}mm"
+            )
+            self.get_logger().warn(
+                f"[CONTACT] changed -> {int(self._contact)} | meas_fz={meas_fz:.3f} | "
+                f"z_floor={z_floor_text} | stage={self.stage.name}"
+            )
 
             self._reset_dither()
 
@@ -4471,7 +5407,7 @@ class NodeCmdMotionInfer(Node):
         stall_win_age = 0.0
         elapsed_since_start = (now_t - self._t_first_pub) if (self._t_first_pub is not None) else 0.0
 
-        if self._t_first_pub is not None:
+        if self._t_first_pub is not None and not self.clean_flow_execution:
             stall_win_age = self._stall_update(pose6.astype(np.float32))
 
             can_check_stall = (elapsed_since_start >= self.stall_min_after_start_sec)
@@ -4500,7 +5436,11 @@ class NodeCmdMotionInfer(Node):
         # DITHER check
         # -----------------------------
         dither_age = 0.0
-        if self._t_first_pub is not None and self._dither_allowed(elapsed_since_start):
+        if (
+            not self.clean_flow_execution
+            and self._t_first_pub is not None
+            and self._dither_allowed(elapsed_since_start)
+        ):
             dither_age = self._dither_update(pose6.astype(np.float32))
 
             if dither_age >= self.dither_sec:
@@ -4548,15 +5488,39 @@ class NodeCmdMotionInfer(Node):
                 self._touch_ok = 0
                 self._enter_preload(pose6.astype(np.float32))
 
+        # Do not use pose Z to push farther into the surface after contact.
+        # Force loading is controlled independently by action Fz. This guard is
+        # deliberately applied after stage selection so no learned/legacy pose
+        # path can bypass it.
+        if self.contact_z_descent_block_enable and self._contact:
+            if self._contact_z_floor_mm is None:
+                self._contact_z_floor_mm = float(pose6[2])
+            min_safe_z = float(self._contact_z_floor_mm - self.contact_z_descent_margin_mm)
+            if float(cmd_target[2]) < min_safe_z:
+                requested_z = float(cmd_target[2])
+                cmd_target[2] = min_safe_z
+                self._contact_z_block_count += 1
+                if self._contact_z_block_count <= 3 or self._contact_z_block_count % 100 == 0:
+                    self.get_logger().warn(
+                        f"[CONTACT-Z-BLOCK] #{self._contact_z_block_count} "
+                        f"requested_z={requested_z:.3f} -> {min_safe_z:.3f}mm "
+                        f"(contact_floor={self._contact_z_floor_mm:.3f}mm)"
+                    )
+
         # -----------------------------
         # Apply kick
         # -----------------------------
-        if self._fz_kick_active:
+        if self._fz_kick_active and not self.clean_flow_execution:
             cmd_target[8] = float(max(cmd_target[8], self.fz_kick_N))
 
         cmd_target[8] = float(max(0.0, cmd_target[8]))
         if self.fz_hard_limit > 0.0:
             cmd_target[8] = float(min(cmd_target[8], self.fz_hard_limit))
+
+        if self.orientation_lock_enable:
+            # Final action boundary for the orientation ablation: no stage,
+            # planner, local anchor, or model prediction may change wx/wy/wz.
+            cmd_target[3:6] = self.orientation_lock_rotvec
 
         # -----------------------------
         # QP-safe slow-follow

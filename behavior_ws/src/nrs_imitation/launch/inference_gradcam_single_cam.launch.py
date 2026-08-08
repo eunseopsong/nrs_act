@@ -14,6 +14,9 @@ def generate_launch_description():
     act_root = LaunchConfiguration("act_root")
     policy_class = LaunchConfiguration("policy_class")
     ckpt_auto_subdir = LaunchConfiguration("ckpt_auto_subdir")
+    metrics_log_enable = LaunchConfiguration("metrics_log_enable")
+    metrics_log_dir = LaunchConfiguration("metrics_log_dir")
+    metrics_run_tag = LaunchConfiguration("metrics_run_tag")
     pose_topic = LaunchConfiguration("pose_topic")
     force_topic = LaunchConfiguration("force_topic")
     image_topic = LaunchConfiguration("image_topic")
@@ -37,6 +40,8 @@ def generate_launch_description():
     stain_min_area = LaunchConfiguration("stain_min_area")
     stain_morph_kernel = LaunchConfiguration("stain_morph_kernel")
     cmd_topic = LaunchConfiguration("cmd_topic")
+    visualization_only = LaunchConfiguration("visualization_only")
+    clean_flow_execution = LaunchConfiguration("clean_flow_execution")
     camera_preprocess_mode = LaunchConfiguration("camera_preprocess_mode")
     chunk_size = LaunchConfiguration("chunk_size")
     use_force_history = LaunchConfiguration("use_force_history")
@@ -46,7 +51,25 @@ def generate_launch_description():
     flow_noise_seed = LaunchConfiguration("flow_noise_seed")
     action_selection_mode = LaunchConfiguration("action_selection_mode")
     trajectory_hz = LaunchConfiguration("trajectory_hz")
+    flow_local_anchor_enable = LaunchConfiguration("flow_local_anchor_enable")
+    flow_replan_interval_steps = LaunchConfiguration("flow_replan_interval_steps")
+    contact_z_descent_block_enable = LaunchConfiguration(
+        "contact_z_descent_block_enable"
+    )
+    contact_z_descent_margin_mm = LaunchConfiguration("contact_z_descent_margin_mm")
     force_xy_cmd_enable = LaunchConfiguration("force_xy_cmd_enable")
+    orientation_lock_enable = LaunchConfiguration("orientation_lock_enable")
+    orientation_lock_wx = LaunchConfiguration("orientation_lock_wx")
+    orientation_lock_wy = LaunchConfiguration("orientation_lock_wy")
+    orientation_lock_wz = LaunchConfiguration("orientation_lock_wz")
+    auto_move_to_demo_start = LaunchConfiguration("auto_move_to_demo_start")
+    demo_start_move_sec = LaunchConfiguration("demo_start_move_sec")
+    demo_start_hold_sec = LaunchConfiguration("demo_start_hold_sec")
+    demo_start_max_align_dist_mm = LaunchConfiguration("demo_start_max_align_dist_mm")
+    demo_start_max_xyz_speed_mm_s = LaunchConfiguration("demo_start_max_xyz_speed_mm_s")
+    demo_start_max_rot_speed_rad_s = LaunchConfiguration("demo_start_max_rot_speed_rad_s")
+    demo_start_position_tolerance_mm = LaunchConfiguration("demo_start_position_tolerance_mm")
+    demo_start_rotation_tolerance_rad = LaunchConfiguration("demo_start_rotation_tolerance_rad")
     cmd_safety_enable = LaunchConfiguration("cmd_safety_enable")
     cmd_safety_max_xyz_from_current_mm = LaunchConfiguration("cmd_safety_max_xyz_from_current_mm")
     cmd_safety_max_xy_from_start_mm = LaunchConfiguration("cmd_safety_max_xy_from_start_mm")
@@ -73,12 +96,46 @@ def generate_launch_description():
     modality_importance_ema_alpha = LaunchConfiguration("modality_importance_ema_alpha")
     modality_importance_topic = LaunchConfiguration("modality_importance_topic")
     visualize_modality_importance = LaunchConfiguration("visualize_modality_importance")
+    flow_vector_overlay_enable = LaunchConfiguration("flow_vector_overlay_enable")
+    flow_vector_overlay_topic = LaunchConfiguration("flow_vector_overlay_topic")
+    flow_vector_overlay_horizons = LaunchConfiguration("flow_vector_overlay_horizons")
+    flow_vector_overlay_selected_horizon = LaunchConfiguration(
+        "flow_vector_overlay_selected_horizon"
+    )
+    flow_vector_overlay_tcp_center_x = LaunchConfiguration(
+        "flow_vector_overlay_tcp_center_x"
+    )
+    flow_vector_overlay_tcp_center_y = LaunchConfiguration(
+        "flow_vector_overlay_tcp_center_y"
+    )
+    flow_vector_overlay_pixels_per_mm = LaunchConfiguration(
+        "flow_vector_overlay_pixels_per_mm"
+    )
+    flow_vector_overlay_m_du_dx = LaunchConfiguration("flow_vector_overlay_m_du_dx")
+    flow_vector_overlay_m_du_dy = LaunchConfiguration("flow_vector_overlay_m_du_dy")
+    flow_vector_overlay_m_dv_dx = LaunchConfiguration("flow_vector_overlay_m_dv_dx")
+    flow_vector_overlay_m_dv_dy = LaunchConfiguration("flow_vector_overlay_m_dv_dy")
+    flow_diagnostic_only = LaunchConfiguration("flow_diagnostic_only")
+    flow_step_service_enable = LaunchConfiguration("flow_step_service_enable")
+    flow_step_service = LaunchConfiguration("flow_step_service")
+    flow_step_max_xyz_mm = LaunchConfiguration("flow_step_max_xyz_mm")
+    flow_step_max_rot_rad = LaunchConfiguration("flow_step_max_rot_rad")
+    flow_step_stats_margin_mm = LaunchConfiguration("flow_step_stats_margin_mm")
+    flow_step_block_down_on_contact = LaunchConfiguration(
+        "flow_step_block_down_on_contact"
+    )
+    visualize_flow_vector = LaunchConfiguration("visualize_flow_vector")
 
     return LaunchDescription([
         DeclareLaunchArgument("ckpt_dir", default_value=""),
         DeclareLaunchArgument("act_root", default_value="~/nrs_imitation"),
-        DeclareLaunchArgument("policy_class", default_value="FLOW"),
+        DeclareLaunchArgument("policy_class", default_value="FLOW"),  # FLOW | BSPLINE | ACT | DIFFUSION
         DeclareLaunchArgument("ckpt_auto_subdir", default_value="polishing/single_cam"),
+        # Optional per-run CSV metrics log for offline FLOW-vs-BSPLINE comparison
+        # (see scripts/compare_policy_runs.py).
+        DeclareLaunchArgument("metrics_log_enable", default_value="false"),
+        DeclareLaunchArgument("metrics_log_dir", default_value=""),
+        DeclareLaunchArgument("metrics_run_tag", default_value=""),
         DeclareLaunchArgument("pose_topic", default_value="/ur10skku/currentP"),
         DeclareLaunchArgument("force_topic", default_value="/ur10skku/currentF"),
         DeclareLaunchArgument("image_topic", default_value="/realsense/vr/color/image_raw"),
@@ -102,6 +159,8 @@ def generate_launch_description():
         DeclareLaunchArgument("stain_min_area", default_value="20"),
         DeclareLaunchArgument("stain_morph_kernel", default_value="3"),
         DeclareLaunchArgument("cmd_topic", default_value="/ur10skku/cmdMotion"),
+        DeclareLaunchArgument("visualization_only", default_value="false"),
+        DeclareLaunchArgument("clean_flow_execution", default_value="false"),
         DeclareLaunchArgument("camera_preprocess_mode", default_value="stabilize"),
         DeclareLaunchArgument("chunk_size", default_value="200"),
         DeclareLaunchArgument("use_force_history", default_value="true"),
@@ -111,7 +170,25 @@ def generate_launch_description():
         DeclareLaunchArgument("flow_noise_seed", default_value="0"),
         DeclareLaunchArgument("action_selection_mode", default_value="trajectory_interp"),
         DeclareLaunchArgument("trajectory_hz", default_value="30.0"),
+        DeclareLaunchArgument("flow_local_anchor_enable", default_value="false"),
+        DeclareLaunchArgument("flow_replan_interval_steps", default_value="30"),
+        DeclareLaunchArgument("contact_z_descent_block_enable", default_value="true"),
+        DeclareLaunchArgument("contact_z_descent_margin_mm", default_value="0.2"),
         DeclareLaunchArgument("force_xy_cmd_enable", default_value="false"),
+        DeclareLaunchArgument("orientation_lock_enable", default_value="false"),
+        DeclareLaunchArgument("orientation_lock_wx", default_value="0.0"),
+        DeclareLaunchArgument("orientation_lock_wy", default_value="0.0"),
+        DeclareLaunchArgument("orientation_lock_wz", default_value="1.5707963268"),
+        DeclareLaunchArgument("auto_move_to_demo_start", default_value="true"),
+        DeclareLaunchArgument("demo_start_move_sec", default_value="5.0"),
+        DeclareLaunchArgument("demo_start_hold_sec", default_value="2.0"),
+        # Disable only the old total-distance rejection. The speed-limited
+        # alignment and current-pose command guard remain active.
+        DeclareLaunchArgument("demo_start_max_align_dist_mm", default_value="0.0"),
+        DeclareLaunchArgument("demo_start_max_xyz_speed_mm_s", default_value="50.0"),
+        DeclareLaunchArgument("demo_start_max_rot_speed_rad_s", default_value="0.25"),
+        DeclareLaunchArgument("demo_start_position_tolerance_mm", default_value="5.0"),
+        DeclareLaunchArgument("demo_start_rotation_tolerance_rad", default_value="0.05"),
 
         # filtered58 demo envelope maxima were approximately XY=134.9 mm,
         # Z-down=79.3 mm, Z-up=86.1 mm. These defaults retain a small margin.
@@ -144,6 +221,37 @@ def generate_launch_description():
             default_value="/inference_single_cam/modality_importance",
         ),
         DeclareLaunchArgument("visualize_modality_importance", default_value="true"),
+        DeclareLaunchArgument("flow_vector_overlay_enable", default_value="false"),
+        DeclareLaunchArgument(
+            "flow_vector_overlay_topic",
+            default_value="/inference_single_cam/flow_vector_overlay",
+        ),
+        DeclareLaunchArgument(
+            "flow_vector_overlay_horizons", default_value="1,5,15,30,60,127"
+        ),
+        DeclareLaunchArgument("flow_vector_overlay_selected_horizon", default_value="30"),
+        DeclareLaunchArgument("flow_vector_overlay_tcp_center_x", default_value="253"),
+        DeclareLaunchArgument("flow_vector_overlay_tcp_center_y", default_value="120"),
+        DeclareLaunchArgument("flow_vector_overlay_pixels_per_mm", default_value="2.0"),
+        # Eye-in-hand camera: 2x2 tool-mm -> image-px matrix. Defaults below
+        # are the 2026-08-08 empirical calibration for the 250mm/45deg mount
+        # (measured via background-patch tracking, see inference_core.py
+        # _render_flow_vector_overlay_rgb docstring). Re-measure and update
+        # these whenever the mount geometry changes.
+        DeclareLaunchArgument("flow_vector_overlay_m_du_dx", default_value="0.0"),
+        DeclareLaunchArgument("flow_vector_overlay_m_du_dy", default_value="0.65"),
+        DeclareLaunchArgument("flow_vector_overlay_m_dv_dx", default_value="0.45"),
+        DeclareLaunchArgument("flow_vector_overlay_m_dv_dy", default_value="0.0"),
+        DeclareLaunchArgument("flow_diagnostic_only", default_value="false"),
+        DeclareLaunchArgument("flow_step_service_enable", default_value="false"),
+        DeclareLaunchArgument(
+            "flow_step_service", default_value="/inference_single_cam/flow_step"
+        ),
+        DeclareLaunchArgument("flow_step_max_xyz_mm", default_value="0.5"),
+        DeclareLaunchArgument("flow_step_max_rot_rad", default_value="0.001"),
+        DeclareLaunchArgument("flow_step_stats_margin_mm", default_value="10.0"),
+        DeclareLaunchArgument("flow_step_block_down_on_contact", default_value="true"),
+        DeclareLaunchArgument("visualize_flow_vector", default_value="false"),
 
         Node(
             package="nrs_imitation",
@@ -183,9 +291,18 @@ def generate_launch_description():
                 "act_root": act_root,
                 "policy_class": policy_class,
                 "ckpt_auto_subdir": ckpt_auto_subdir,
+                "metrics_log_enable": ParameterValue(metrics_log_enable, value_type=bool),
+                "metrics_log_dir": metrics_log_dir,
+                "metrics_run_tag": metrics_run_tag,
                 "pose_topic": pose_topic,
                 "force_topic": force_topic,
                 "image_topic": image_topic,
+                "visualization_only": ParameterValue(
+                    visualization_only, value_type=bool
+                ),
+                "clean_flow_execution": ParameterValue(
+                    clean_flow_execution, value_type=bool
+                ),
                 # ROS/YAML interprets the unquoted token "off" as Boolean False.
                 # Force a string so camera_preprocess_mode:=off reaches the node as intended.
                 "camera_preprocess_mode": ParameterValue(camera_preprocess_mode, value_type=str),
@@ -197,7 +314,51 @@ def generate_launch_description():
                 "flow_noise_seed": ParameterValue(flow_noise_seed, value_type=int),
                 "action_selection_mode": action_selection_mode,
                 "trajectory_hz": ParameterValue(trajectory_hz, value_type=float),
+                "flow_local_anchor_enable": ParameterValue(
+                    flow_local_anchor_enable, value_type=bool
+                ),
+                "flow_replan_interval_steps": ParameterValue(
+                    flow_replan_interval_steps, value_type=int
+                ),
+                "contact_z_descent_block_enable": ParameterValue(
+                    contact_z_descent_block_enable, value_type=bool
+                ),
+                "contact_z_descent_margin_mm": ParameterValue(
+                    contact_z_descent_margin_mm, value_type=float
+                ),
                 "force_xy_cmd_enable": ParameterValue(force_xy_cmd_enable, value_type=bool),
+                "orientation_lock_enable": ParameterValue(
+                    orientation_lock_enable, value_type=bool
+                ),
+                "orientation_lock_wx": ParameterValue(
+                    orientation_lock_wx, value_type=float
+                ),
+                "orientation_lock_wy": ParameterValue(
+                    orientation_lock_wy, value_type=float
+                ),
+                "orientation_lock_wz": ParameterValue(
+                    orientation_lock_wz, value_type=float
+                ),
+                "auto_move_to_demo_start": ParameterValue(
+                    auto_move_to_demo_start, value_type=bool
+                ),
+                "demo_start_move_sec": ParameterValue(demo_start_move_sec, value_type=float),
+                "demo_start_hold_sec": ParameterValue(demo_start_hold_sec, value_type=float),
+                "demo_start_max_align_dist_mm": ParameterValue(
+                    demo_start_max_align_dist_mm, value_type=float
+                ),
+                "demo_start_max_xyz_speed_mm_s": ParameterValue(
+                    demo_start_max_xyz_speed_mm_s, value_type=float
+                ),
+                "demo_start_max_rot_speed_rad_s": ParameterValue(
+                    demo_start_max_rot_speed_rad_s, value_type=float
+                ),
+                "demo_start_position_tolerance_mm": ParameterValue(
+                    demo_start_position_tolerance_mm, value_type=float
+                ),
+                "demo_start_rotation_tolerance_rad": ParameterValue(
+                    demo_start_rotation_tolerance_rad, value_type=float
+                ),
                 "cmd_safety_enable": ParameterValue(cmd_safety_enable, value_type=bool),
                 "cmd_safety_max_xyz_from_current_mm": ParameterValue(
                     cmd_safety_max_xyz_from_current_mm, value_type=float
@@ -244,6 +405,54 @@ def generate_launch_description():
                     modality_importance_ema_alpha, value_type=float
                 ),
                 "modality_importance_topic": modality_importance_topic,
+                "flow_vector_overlay_enable": ParameterValue(
+                    flow_vector_overlay_enable, value_type=bool
+                ),
+                "flow_vector_overlay_topic": flow_vector_overlay_topic,
+                "flow_vector_overlay_horizons": flow_vector_overlay_horizons,
+                "flow_vector_overlay_selected_horizon": ParameterValue(
+                    flow_vector_overlay_selected_horizon, value_type=int
+                ),
+                "flow_vector_overlay_tcp_center_x": ParameterValue(
+                    flow_vector_overlay_tcp_center_x, value_type=int
+                ),
+                "flow_vector_overlay_tcp_center_y": ParameterValue(
+                    flow_vector_overlay_tcp_center_y, value_type=int
+                ),
+                "flow_vector_overlay_pixels_per_mm": ParameterValue(
+                    flow_vector_overlay_pixels_per_mm, value_type=float
+                ),
+                "flow_vector_overlay_m_du_dx": ParameterValue(
+                    flow_vector_overlay_m_du_dx, value_type=float
+                ),
+                "flow_vector_overlay_m_du_dy": ParameterValue(
+                    flow_vector_overlay_m_du_dy, value_type=float
+                ),
+                "flow_vector_overlay_m_dv_dx": ParameterValue(
+                    flow_vector_overlay_m_dv_dx, value_type=float
+                ),
+                "flow_vector_overlay_m_dv_dy": ParameterValue(
+                    flow_vector_overlay_m_dv_dy, value_type=float
+                ),
+                "flow_diagnostic_only": ParameterValue(
+                    flow_diagnostic_only, value_type=bool
+                ),
+                "flow_step_service_enable": ParameterValue(
+                    flow_step_service_enable, value_type=bool
+                ),
+                "flow_step_service": flow_step_service,
+                "flow_step_max_xyz_mm": ParameterValue(
+                    flow_step_max_xyz_mm, value_type=float
+                ),
+                "flow_step_max_rot_rad": ParameterValue(
+                    flow_step_max_rot_rad, value_type=float
+                ),
+                "flow_step_stats_margin_mm": ParameterValue(
+                    flow_step_stats_margin_mm, value_type=float
+                ),
+                "flow_step_block_down_on_contact": ParameterValue(
+                    flow_step_block_down_on_contact, value_type=bool
+                ),
             }],
         ),
 
@@ -263,5 +472,14 @@ def generate_launch_description():
             output="screen",
             arguments=[modality_importance_topic],
             condition=IfCondition(visualize_modality_importance),
+        ),
+
+        Node(
+            package="rqt_image_view",
+            executable="rqt_image_view",
+            name="flow_vector_overlay_viewer",
+            output="screen",
+            arguments=[flow_vector_overlay_topic],
+            condition=IfCondition(visualize_flow_vector),
         ),
     ])

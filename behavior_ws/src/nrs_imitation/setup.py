@@ -40,6 +40,7 @@ setup(
             'inference_dual_cam = nrs_imitation.inference_dual_cam:main',
             'inference_gripper_single_cam = nrs_imitation.inference_gripper_single_cam:main',
             'stain_mask_publisher = nrs_imitation.stain_mask_publisher:main',
+            'episode_playback = nrs_imitation.episode_playback:main',
 
             # Demonstration recording
             'hdf5_recorder_single_cam = nrs_imitation.hdf5_recorder_single_cam:main',
