@@ -424,6 +424,32 @@ def _read_first_dataset_row(f: h5py.File, keys: Sequence[str]) -> Optional[np.nd
     return None
 
 
+def _density_mode_index(points_xyz: np.ndarray, k: int = 5) -> int:
+    """Index of the real sample sitting in the locally densest neighborhood.
+
+    Demo-start XYZ can be multimodal (e.g. the same task recorded with
+    varying reach/length, so recording sometimes started further along the
+    approach than other times). Neither the arithmetic mean nor the global
+    medoid handle that well: the mean lands on a synthetic point no episode
+    ever occupied, and the medoid (min total distance to all others) still
+    gets pulled toward the midpoint *between* clusters rather than landing
+    inside the most-repeated one.
+
+    This instead measures local density via distance to the k-th nearest
+    neighbor (smaller = denser) and picks the point in the tightest,
+    most-repeated neighborhood. It requires no prior knowledge of cluster
+    count or an absolute distance scale, so it degrades gracefully to
+    "medoid-like" behavior on a unimodal/tight dataset while correctly
+    favoring the dominant cluster on a multimodal one.
+    """
+    n = points_xyz.shape[0]
+    k_eff = max(1, min(int(k), n - 1))
+    diffs = points_xyz[:, None, :] - points_xyz[None, :, :]
+    dist = np.linalg.norm(diffs, axis=-1)
+    knn_dist = np.sort(dist, axis=1)[:, k_eff]
+    return int(np.argmin(knn_dist))
+
+
 def collect_demo_start_pose_stats(dataset_dir: str, num_episodes: int = 0) -> Dict[str, object]:
     files = _episode_files(dataset_dir)
     if num_episodes is not None and int(num_episodes) > 0:
@@ -452,13 +478,28 @@ def collect_demo_start_pose_stats(dataset_dir: str, num_episodes: int = 0) -> Di
         return {}
     pose_all = np.stack(poses, axis=0).astype(np.float32)
     qpos_all = np.stack(qposes, axis=0).astype(np.float32)
+
+    # "demo_start_pose_mean" drives the ROS node's auto_move_to_demo_start
+    # alignment target, so it must be a pose that is actually safe to move
+    # to. Select it via k-NN density mode (real recorded pose in the
+    # tightest, most-repeated neighborhood) instead of the arithmetic mean,
+    # which can land on a synthetic point far outside -- or between -- the
+    # demonstrated envelope when start poses are spread out or multimodal
+    # (e.g. varying task reach/length episode to episode). The key name is
+    # kept for backward compatibility with existing checkpoint consumers.
+    mode_i = _density_mode_index(pose_all[:, :3])
+    arithmetic_mean_pose = pose_all.mean(axis=0).astype(np.float32)
+
     out = {
-        "demo_start_pose_mean": pose_all.mean(axis=0).astype(np.float32),
+        "demo_start_pose_mean": pose_all[mode_i].copy(),
+        "demo_start_pose_arithmetic_mean": arithmetic_mean_pose,
+        "demo_start_pose_stat_method": "knn_density_mode",
         "demo_start_pose_std": pose_all.std(axis=0).astype(np.float32),
         "demo_start_pose_min": pose_all.min(axis=0).astype(np.float32),
         "demo_start_pose_max": pose_all.max(axis=0).astype(np.float32),
         "demo_start_pose_all": pose_all,
-        "demo_start_qpos_mean": qpos_all.mean(axis=0).astype(np.float32),
+        "demo_start_qpos_mean": qpos_all[mode_i].copy(),
+        "demo_start_qpos_arithmetic_mean": qpos_all.mean(axis=0).astype(np.float32),
         "demo_start_qpos_std": qpos_all.std(axis=0).astype(np.float32),
         "demo_start_qpos_min": qpos_all.min(axis=0).astype(np.float32),
         "demo_start_qpos_max": qpos_all.max(axis=0).astype(np.float32),
@@ -466,8 +507,17 @@ def collect_demo_start_pose_stats(dataset_dir: str, num_episodes: int = 0) -> Di
         "demo_start_num_episodes": int(pose_all.shape[0]),
         "demo_start_source_dataset_dir": str(Path(dataset_dir).expanduser()),
         "demo_start_episode_files": used_files,
+        "demo_start_mode_episode_file": used_files[mode_i],
     }
-    print("[DEMO_START] pose_mean = " + np.array2string(out["demo_start_pose_mean"], precision=4, separator=", "))
+    print(
+        "[DEMO_START] pose_mean(knn_density_mode) = "
+        + np.array2string(out["demo_start_pose_mean"], precision=4, separator=", ")
+        + f"  <- {used_files[mode_i]}"
+    )
+    print(
+        "[DEMO_START] pose_mean(arithmetic, for reference only) = "
+        + np.array2string(arithmetic_mean_pose, precision=4, separator=", ")
+    )
     return out
 
 
