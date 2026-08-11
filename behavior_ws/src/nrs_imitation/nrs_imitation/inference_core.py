@@ -4209,20 +4209,27 @@ class NodeCmdMotionInfer(Node):
     # ------------------------------------------------------------
     def _enter_preload(self, pose6_now: np.ndarray):
         """
-        PRELOAD removed (bypassed).
-        Keep this function name so the rest of the code path stays unchanged,
-        but transition directly from APPROACH to TRACK once touch is confirmed.
+        Enter PRELOAD on first touch instead of handing control straight back
+        to the raw FLOW/BSPLINE trajectory. TRACK's cmd is either a stale
+        replan (un-anchored absolute target, possibly still mm away from the
+        live pose) or a policy prediction with no notion of "we just made
+        contact" -- letting it keep driving is what produced the violent
+        force spikes at touchdown (20260811). PRELOAD instead closes a slow,
+        measured-Fz-driven loop (preload_dz_max_mm per tick) from the live
+        pose up to preload_target_N before TRACK resumes.
         """
         self._preload_t0 = _monotonic()
         self._preload_ok = 0
         self._preload_hold_pose6 = pose6_now.astype(np.float32).copy()
         self._preload_target_N = self._compute_preload_target()
 
+        self.stage = Stage.PRELOAD
+        self.plans.clear()
+        self._anchor_ready = False
+
         self.get_logger().warn(
-            f"[STAGE] PRELOAD bypassed -> TRACK directly "
-            f"(touch confirmed, nominal_target={self._preload_target_N:.2f}N)"
+            f"[STAGE] -> PRELOAD (touch confirmed, target={self._preload_target_N:.2f}N)"
         )
-        self._enter_track()
 
     def _enter_track(self):
         self.stage = Stage.TRACK
@@ -5284,6 +5291,14 @@ class NodeCmdMotionInfer(Node):
             if self._contact:
                 self._contact_z_floor_mm = float(pose6[2])
                 self._contact_z_block_count = 0
+                # The touch detector that used to call _enter_preload() only
+                # runs during Stage.APPROACH, but FLOW/BSPLINE now make first
+                # contact well into Stage.TRACK -- so PRELOAD was never
+                # entered from there and TRACK's raw trajectory kept driving
+                # straight through touchdown (20260811 v3/v4 FLOW ESTOPs).
+                # Hook the same rising edge RELEASE already uses below.
+                if self.stage == Stage.TRACK:
+                    self._enter_preload(pose6.astype(np.float32))
             else:
                 self._contact_z_floor_mm = None
             if self.clear_plans_on_contact_change:
