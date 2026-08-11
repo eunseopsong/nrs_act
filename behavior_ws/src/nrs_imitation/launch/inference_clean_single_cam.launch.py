@@ -92,7 +92,12 @@ def generate_launch_description():
                     "tcp_roi_reference_height": "240",
                     "tcp_roi_center_x": "253",
                     "tcp_roi_center_y": "120",
-                    "tcp_roi_area_fraction": "0.10",
+                    # Must match the checkpoint's training-time tcp_roi_area_fraction
+                    # (inference_core.py overrides the model's own value from
+                    # dataset_stats.pkl, but stain_mask_publisher only sees this
+                    # launch arg -- keep them in sync or the overlay box drifts
+                    # from what the model actually attends to).
+                    "tcp_roi_area_fraction": "0.25",
                     "camera_preprocess_mode": "stabilize",
                     "chunk_size": "128",
                     "use_force_history": "true",
