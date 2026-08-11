@@ -68,6 +68,7 @@ from geometry_msgs.msg import Wrench
 from std_msgs.msg import Float32, Float64MultiArray, Int32
 from sensor_msgs.msg import Image
 from std_srvs.srv import Trigger
+from y2_rob_motion_interfaces.srv import SingleArmCommand
 
 
 DEFAULT_ACT_ROOT = os.path.expanduser("~/nrs_imitation")
@@ -1305,6 +1306,18 @@ class NodeCmdMotionInfer(Node):
         # commanded trajectory, has settled near the demonstration start.
         self.declare_parameter("demo_start_position_tolerance_mm", 5.0)
         self.declare_parameter("demo_start_rotation_tolerance_rad", 0.05)
+        # Drive the current-pose -> demo_start move through the controller's
+        # native PTP (singleArm_cmd/single_arm_command service) instead of
+        # this node's own smoothstep + admittance position servo. False
+        # restores the old smoothstep path for rollback.
+        self.declare_parameter("demo_start_use_ptp_service", True)
+        self.declare_parameter("ptp_service_name", "/singleArm_cmd/single_arm_command")
+        self.declare_parameter("ptp_target_velocity_mm_s", 20.0)
+        self.declare_parameter("ptp_service_timeout_sec", 30.0)
+        # PTP_command_gen switches the low-level controller to Position mode
+        # internally. Switch it back to Force mode (same service) once PTP
+        # completes, before policy inference starts publishing to cmdMotion.
+        self.declare_parameter("ptp_switch_to_force_mode", True)
 
         # Optional policy-output Z offset.
         # This is applied to every denormalized absolute action z target.
@@ -1762,6 +1775,19 @@ class NodeCmdMotionInfer(Node):
         self.demo_start_rotation_tolerance_rad = max(
             0.0, float(self.get_parameter("demo_start_rotation_tolerance_rad").value)
         )
+        self.demo_start_use_ptp_service = bool(
+            self.get_parameter("demo_start_use_ptp_service").value
+        )
+        self.ptp_service_name = str(self.get_parameter("ptp_service_name").value)
+        self.ptp_target_velocity_mm_s = max(
+            0.0, float(self.get_parameter("ptp_target_velocity_mm_s").value)
+        )
+        self.ptp_service_timeout_sec = max(
+            0.0, float(self.get_parameter("ptp_service_timeout_sec").value)
+        )
+        self.ptp_switch_to_force_mode = bool(
+            self.get_parameter("ptp_switch_to_force_mode").value
+        )
         self.policy_z_offset_mm = float(self.get_parameter("policy_z_offset_mm").value)
         self.cmd_safety_enable = bool(self.get_parameter("cmd_safety_enable").value)
         self.cmd_safety_max_xyz_from_current_mm = float(self.get_parameter("cmd_safety_max_xyz_from_current_mm").value)
@@ -2109,6 +2135,7 @@ class NodeCmdMotionInfer(Node):
         self._cmd_safety_last_log = 0.0
         self._cmd_safety_latched = False
         self._cmd_safety_latch_reason = ""
+        self._cmd_safety_hold_pose6: Optional[np.ndarray] = None
         self._demo_start_safety_last_log = 0.0
         self._demo_start_wait_last_log = 0.0
         self._last_gripper_cmd: Optional[int] = None
@@ -2139,6 +2166,7 @@ class NodeCmdMotionInfer(Node):
         self._demo_start_hold_t0: Optional[float] = None
         self._demo_start_from_pose6: Optional[np.ndarray] = None
         self._demo_start_effective_move_sec: Optional[float] = None
+        self._ptp_alignment_requested = False
 
         # contact state
         self._contact = False
@@ -2223,6 +2251,10 @@ class NodeCmdMotionInfer(Node):
         self.pub_gripper_goal_current = None
         if not self.visualization_only:
             self.pub_cmd = self.create_publisher(Float64MultiArray, self.cmd_topic, 10)
+
+        self._ptp_client = None
+        if self.auto_move_to_demo_start and self.demo_start_use_ptp_service:
+            self._ptp_client = self.create_client(SingleArmCommand, self.ptp_service_name)
         if self.use_gripper and not self.visualization_only:
             self.pub_gripper_cmd = self.create_publisher(Int32, self.gripper_command_topic, 10)
             self.pub_gripper_goal_current = self.create_publisher(
@@ -4697,8 +4729,25 @@ class NodeCmdMotionInfer(Node):
                     self._cmd_safety_latch_reason = reason
 
             if reason:
-                if pose6 is not None and np.all(np.isfinite(pose6[:6])):
-                    published = self._hold_cmd_from_pose(pose6)
+                # Anchor the hold to a single fixed pose the first tick a
+                # violation fires, and keep publishing that same frozen pose
+                # every tick after -- not a freshly re-sampled pose6 each
+                # time. Re-sampling made "hold" chase wherever the robot
+                # currently measures itself to be, so if it still had
+                # residual velocity/momentum the admittance spring never saw
+                # a position error and applied zero braking force: the robot
+                # coasted straight through the "hold" into contact instead of
+                # being arrested by it (20260811 17:19 FLOW -- ~2s of
+                # unresolved ~20mm tracking error, hold engaged, robot fell
+                # another ~9mm into a 147N impact anyway).
+                if self._cmd_safety_hold_pose6 is None:
+                    if pose6 is not None and np.all(np.isfinite(pose6[:6])):
+                        self._cmd_safety_hold_pose6 = pose6.astype(np.float32).copy()
+                    elif self.prev_cmd is not None:
+                        self._cmd_safety_hold_pose6 = self.prev_cmd[:6].astype(np.float32).copy()
+
+                if self._cmd_safety_hold_pose6 is not None:
+                    published = self._hold_cmd_from_pose(self._cmd_safety_hold_pose6)
                 elif self.prev_cmd is not None:
                     published = self.prev_cmd.astype(np.float32).copy()
                 else:
@@ -4715,8 +4764,10 @@ class NodeCmdMotionInfer(Node):
                         f"start_delta_xyz=[{start_delta[0]:.3f},{start_delta[1]:.3f},{start_delta[2]:.3f}]mm "
                         f"start_xy_radius={start_xy_radius:.3f}mm "
                         f"latched={int(self._cmd_safety_latched)}. "
-                        "Publishing current-pose hold/previous safe command."
+                        "Publishing fixed-pose hold anchored at violation onset."
                     )
+            else:
+                self._cmd_safety_hold_pose6 = None
             blocked = bool(reason)
 
         m = Float64MultiArray()
@@ -5068,6 +5119,147 @@ class NodeCmdMotionInfer(Node):
         self._ctrl_no_plan_last_log = 0.0
         self._infer_plan_count = 0
 
+    def _start_ptp_alignment(self, pose6_now: np.ndarray):
+        """
+        Drive current pose -> demo_start_pose_mean through the controller's
+        native PTP path (singleArm_cmd/single_arm_command service) instead of
+        this node's own smoothstep + admittance position servo.
+        """
+        self._ptp_alignment_requested = True
+
+        if self.demo_start_pose6 is None:
+            self.get_logger().warn("[DEMO_START] no demo_start_pose6. Skip PTP alignment.")
+            self._demo_start_align_done = True
+            return
+
+        target = self.demo_start_pose6.astype(np.float32).copy()
+        target[2] += float(self.demo_start_z_offset_mm)
+
+        align_dist = float(np.linalg.norm(target[0:3] - pose6_now[0:3]))
+        if self.demo_start_max_align_dist_mm > 0.0 and align_dist > float(self.demo_start_max_align_dist_mm):
+            self.get_logger().error(
+                "[DEMO_START-SAFETY] PTP target is too far from current pose: "
+                f"dist={align_dist:.3f}mm > limit={self.demo_start_max_align_dist_mm:.3f}mm. "
+                "Refusing to PTP -- move the robot near demo_start manually or raise "
+                "demo_start_max_align_dist_mm deliberately, then restart."
+            )
+            return
+
+        if self._ptp_client is None or not self._ptp_client.service_is_ready():
+            self.get_logger().error(
+                f"[DEMO_START] PTP service '{self.ptp_service_name}' is not available "
+                "-- is singleArm_cmd running (dev_ws robot bringup)? Will retry."
+            )
+            self._ptp_alignment_requested = False
+            return
+
+        req = SingleArmCommand.Request()
+        req.command_mode = "PTP"
+        # singleArm_cmd's PTP_command_gen converts target_pose[3:6] with
+        # DegreeToRadian() -- this service wants degrees, unlike every other
+        # pose field in this node which is radians.
+        req.target_pose = [
+            float(target[0]), float(target[1]), float(target[2]),
+            float(np.degrees(target[3])),
+            float(np.degrees(target[4])),
+            float(np.degrees(target[5])),
+        ]
+        req.target_velocity = float(self.ptp_target_velocity_mm_s)
+
+        self.get_logger().warn(
+            "[DEMO_START] requesting PTP to demo_start_pose_mean + world_Z_offset "
+            f"({self.demo_start_z_offset_mm:.3f}mm), dist={align_dist:.3f}mm, "
+            f"target_velocity={req.target_velocity:.1f}mm/s via {self.ptp_service_name}"
+        )
+        future = self._ptp_client.call_async(req)
+        future.add_done_callback(self._on_ptp_alignment_done)
+
+    def _on_ptp_alignment_done(self, future):
+        try:
+            resp = future.result()
+        except Exception as exc:
+            self.get_logger().error(
+                f"[DEMO_START] PTP service call raised: {exc}. "
+                "Node will stay idle -- fix and restart."
+            )
+            return
+
+        if not resp.success:
+            self.get_logger().error(
+                f"[DEMO_START] PTP motion failed: {resp.message}. "
+                "Node will stay idle -- fix and restart."
+            )
+            return
+
+        self.get_logger().warn(f"[DEMO_START] PTP complete: {resp.message}")
+
+        if not self.ptp_switch_to_force_mode:
+            self._finish_ptp_alignment()
+            return
+
+        # PTP_command_gen switches the low-level controller to Position mode
+        # internally -- switch it back to Force before policy inference
+        # starts publishing 9D pose+force commands to cmdMotion.
+        force_req = SingleArmCommand.Request()
+        force_req.command_mode = "Force"
+        future2 = self._ptp_client.call_async(force_req)
+        future2.add_done_callback(self._on_ptp_force_mode_done)
+
+    def _on_ptp_force_mode_done(self, future):
+        try:
+            resp = future.result()
+        except Exception as exc:
+            self.get_logger().error(
+                f"[DEMO_START] Force-mode switch raised: {exc}. "
+                "Node will stay idle -- fix and restart."
+            )
+            return
+
+        if not resp.success:
+            self.get_logger().error(
+                f"[DEMO_START] Force-mode switch failed: {resp.message}. "
+                "Node will stay idle -- fix and restart."
+            )
+            return
+
+        self.get_logger().warn(f"[DEMO_START] Force mode active: {resp.message}.")
+        self._finish_ptp_alignment()
+
+    def _finish_ptp_alignment(self):
+        """
+        PTP_command_gen streams to cmdMotion directly and this node publishes
+        nothing while waiting on the PTP/Force-mode service calls, so
+        self.prev_cmd, self._start_pose6, self.stage etc. are all still
+        whatever they were before the (possibly 100+mm) PTP move -- the same
+        staleness _run_demo_start_alignment's own completion always cleared
+        via _reset_after_demo_start_alignment(). Skipping that here is what
+        sent a stale ~130mm-old target back into TRACK/PRELOAD right after a
+        real PTP move landed (20260811 17:14 FLOW run: dangerous motion right
+        after arrival). Re-anchor everything to the live pose before letting
+        control resume.
+        """
+        with self._lock:
+            pose6_now = None if self._pose6 is None else self._pose6.copy()
+
+        if pose6_now is None:
+            self.get_logger().error(
+                "[DEMO_START] no live pose available after PTP alignment -- "
+                "cannot reset control state. Node will stay idle -- restart."
+            )
+            return
+
+        pose6_now = pose6_now.astype(np.float32)
+        cmd9 = self._hold_cmd_from_pose(pose6_now)
+        self._reset_after_demo_start_alignment(
+            pose6_now=pose6_now, cmd9=cmd9, now_t=_monotonic()
+        )
+        self._demo_start_align_done = True
+        self.get_logger().warn(
+            "[DEMO_START] state reset at live pose "
+            f"{np.array2string(pose6_now, precision=3, separator=', ')} -- "
+            "stage=TRACK, resuming policy control."
+        )
+
     def _run_demo_start_alignment(self, pose6: np.ndarray, now_t: float):
         """
         Move current robot pose to demo_start_pose_mean before policy inference.
@@ -5289,7 +5481,15 @@ class NodeCmdMotionInfer(Node):
             return
 
         if self.auto_move_to_demo_start and not self._demo_start_align_done:
-            self._run_demo_start_alignment(pose6.astype(np.float32), now_t)
+            if self.demo_start_use_ptp_service:
+                # PTP_command_gen streams its own path straight to cmdMotion
+                # from singleArm_cmd -- publishing anything from here at the
+                # same time would race it on the same topic. Just wait for
+                # the async service callback to flip _demo_start_align_done.
+                if not self._ptp_alignment_requested:
+                    self._start_ptp_alignment(pose6.astype(np.float32))
+            else:
+                self._run_demo_start_alignment(pose6.astype(np.float32), now_t)
             return
 
         # Diagnostic mode allows only the one-time, speed-limited alignment
