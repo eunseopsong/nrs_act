@@ -100,12 +100,18 @@ def generate_launch_description():
                     "flow_infer_steps": "10",
                     "flow_deterministic_noise": "true",
                     "flow_noise_seed": "0",
-                    # Replay the learned FLOW trajectory directly. Replan once
-                    # per 30 samples (about one second), not every infer tick.
+                    # Replay the learned FLOW trajectory directly. Let each
+                    # absolute-referenced plan run close to its full
+                    # chunk_size=128 horizon (~4.3s @ 30Hz) before replanning,
+                    # instead of cutting it off after ~1s. local_anchor is off:
+                    # anchoring plans to the live pose removed the self-
+                    # correction against the model's absolute target, so a
+                    # small per-step z bias accumulated into unbounded ascent
+                    # (20260811 FLOW anchorfix runs, ESTOP both times).
                     "action_selection_mode": "trajectory_interp",
                     "trajectory_hz": "30.0",
-                    "flow_local_anchor_enable": "true",
-                    "flow_replan_interval_steps": "30",
+                    "flow_local_anchor_enable": "false",
+                    "flow_replan_interval_steps": "120",
                     # Only the requested diagnostic windows are shown.
                     "gradcam_enable": "false",
                     "visualize": "false",
