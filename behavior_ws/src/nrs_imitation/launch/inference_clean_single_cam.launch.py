@@ -81,7 +81,7 @@ def generate_launch_description():
                     "flow_step_service_enable": "false",
                     "auto_move_to_demo_start": "true",
                     "orientation_lock_enable": "false",
-                    "contact_z_descent_block_enable": "false",
+                    "contact_z_descent_block_enable": "true",
                     "force_xy_cmd_enable": "false",
                     "cmd_safety_enable": "true",
                     # Match the checkpoint's observation construction.
@@ -104,7 +104,7 @@ def generate_launch_description():
                     # per 30 samples (about one second), not every infer tick.
                     "action_selection_mode": "trajectory_interp",
                     "trajectory_hz": "30.0",
-                    "flow_local_anchor_enable": "false",
+                    "flow_local_anchor_enable": "true",
                     "flow_replan_interval_steps": "30",
                     # Only the requested diagnostic windows are shown.
                     "gradcam_enable": "false",
