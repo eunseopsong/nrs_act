@@ -84,6 +84,16 @@ def generate_launch_description():
                     "contact_z_descent_block_enable": "true",
                     "force_xy_cmd_enable": "false",
                     "cmd_safety_enable": "true",
+                    # Default (85mm, from inference_gradcam_single_cam.launch.py)
+                    # is tighter than the ~110mm typically needed from TRACK's
+                    # start pose down to real contact -- it went unnoticed
+                    # while a separate bug (fixed 20260811) let the robot drift
+                    # via a force-mode side channel instead of actually
+                    # tracking cmd_z, so cmd_z itself rarely got this far.
+                    # Now that tracking is correct, give real task depth
+                    # headroom while staying well under the 200mm current-pose
+                    # backstop.
+                    "cmd_safety_max_z_down_from_start_mm": "140.0",
                     # Match the checkpoint's observation construction.
                     "use_stain_mask": use_stain_mask,
                     "auto_stain_mask": "true",

@@ -5618,6 +5618,21 @@ class NodeCmdMotionInfer(Node):
                 cmd_target[7] = 0.0
                 cmd_target[8] = 0.0
 
+            # force_control.cpp treats ANY |Fd| > 0.01N as "desired_force_active"
+            # and, once desired but not yet actual_force_active (measured
+            # |Fext| > 1.5N), drops z stiffness to 0 and drives with a fixed
+            # force_switch_precontact_force_hold (15N) instead of tracking
+            # cmd_z at all. The raw FLOW/BSPLINE fz prediction during TRACK is
+            # rarely exactly 0 even in free space, so this was silently
+            # disabling z position control for seconds before real contact --
+            # meas_z outran the rate-limited cmd_z the whole time (20260811
+            # 17:19/17:42 FLOW: ~20mm cmd/meas gap over ~2s, then a hard
+            # impact once real contact finally caught up). Keep fz at 0
+            # through TRACK until contact is confirmed; PRELOAD is the one
+            # stage allowed to command it deliberately.
+            if self.stage == Stage.TRACK and not self._contact:
+                cmd_target[8] = 0.0
+
             if self.stage == Stage.RELEASE:
                 cmd_target = self._release_force(cmd_target)
                 if (_monotonic() - self._release_t0) >= max(1e-6, self.release_ramp_sec):
