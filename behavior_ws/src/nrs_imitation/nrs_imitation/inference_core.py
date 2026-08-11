@@ -1251,6 +1251,7 @@ class NodeCmdMotionInfer(Node):
         self.declare_parameter("preload_kp_mm_per_N", 0.02)
         self.declare_parameter("preload_dz_max_mm", 0.08)
         self.declare_parameter("preload_tol_N", 0.2)
+        self.declare_parameter("preload_max_descent_mm", 8.0)
         self.declare_parameter("press_force_cmd_mode", "target")  # keep|zero|target
         self.declare_parameter("press_hold_xy", True)
         self.declare_parameter("press_hold_rpy", True)
@@ -1706,6 +1707,9 @@ class NodeCmdMotionInfer(Node):
         self.preload_kp_mm_per_N = float(self.get_parameter("preload_kp_mm_per_N").value)
         self.preload_dz_max_mm = float(self.get_parameter("preload_dz_max_mm").value)
         self.preload_tol_N = float(self.get_parameter("preload_tol_N").value)
+        self.preload_max_descent_mm = max(
+            0.0, float(self.get_parameter("preload_max_descent_mm").value)
+        )
         self.press_force_cmd_mode = str(self.get_parameter("press_force_cmd_mode").value).strip().lower()
         self.press_hold_xy = bool(self.get_parameter("press_hold_xy").value)
         self.press_hold_rpy = bool(self.get_parameter("press_hold_rpy").value)
@@ -2141,6 +2145,7 @@ class NodeCmdMotionInfer(Node):
         self._last_contact = False
         self._contact_z_floor_mm: Optional[float] = None
         self._contact_z_block_count = 0
+        self._preload_trigger_ok = 0
 
         self.stage = Stage.APPROACH
 
@@ -4862,6 +4867,13 @@ class NodeCmdMotionInfer(Node):
         dz = self.preload_kp_mm_per_N * max(0.0, err)
         dz = float(np.clip(dz, 0.0, self.preload_dz_max_mm))
         cmd[2] = float(cmd[2] - dz)
+        # A false trigger (meas_fz never reaches target) makes err stay
+        # large for the whole preload_timeout_sec window, so dz saturates
+        # at its per-tick cap every tick -- bound the total blind descent
+        # from the entry pose regardless of how long that keeps happening.
+        if self.preload_max_descent_mm > 0.0:
+            floor_z = float(hold[2]) - self.preload_max_descent_mm
+            cmd[2] = float(max(cmd[2], floor_z))
 
         mode = self.press_force_cmd_mode
         if mode == "zero":
@@ -5029,6 +5041,7 @@ class NodeCmdMotionInfer(Node):
         self._last_contact = False
         self._contact_z_floor_mm = None
         self._touch_ok = 0
+        self._preload_trigger_ok = 0
 
         self._fz_base = 0.0
         self._fz_base_init = False
@@ -5286,19 +5299,30 @@ class NodeCmdMotionInfer(Node):
         if self.flow_diagnostic_only:
             return
 
+        # Debounce PRELOAD entry from TRACK: a single noisy tick crossing
+        # contact_on_thr used to be enough to commit to a multi-second
+        # PRELOAD hunt. Because preload_dz_max_mm saturates to its max rate
+        # whenever meas_fz sits well below target -- exactly what a false
+        # trigger looks like -- that turned each false positive into an
+        # unbounded ~10mm/s blind descent for up to preload_timeout_sec,
+        # repeatedly plunging the tool tens of mm in free space before it
+        # finally hit the real surface still moving fast (20260811 v5 FLOW,
+        # 225N peak). Require touch_ok_count consecutive ticks above
+        # contact_on_thr before actually entering PRELOAD.
+        if self.stage == Stage.TRACK:
+            if meas_fz >= self.contact_on_thr:
+                self._preload_trigger_ok += 1
+            else:
+                self._preload_trigger_ok = 0
+            if self._preload_trigger_ok >= self.touch_ok_count:
+                self._preload_trigger_ok = 0
+                self._enter_preload(pose6.astype(np.float32))
+
         changed = self._update_contact(meas_fz)
         if changed:
             if self._contact:
                 self._contact_z_floor_mm = float(pose6[2])
                 self._contact_z_block_count = 0
-                # The touch detector that used to call _enter_preload() only
-                # runs during Stage.APPROACH, but FLOW/BSPLINE now make first
-                # contact well into Stage.TRACK -- so PRELOAD was never
-                # entered from there and TRACK's raw trajectory kept driving
-                # straight through touchdown (20260811 v3/v4 FLOW ESTOPs).
-                # Hook the same rising edge RELEASE already uses below.
-                if self.stage == Stage.TRACK:
-                    self._enter_preload(pose6.astype(np.float32))
             else:
                 self._contact_z_floor_mm = None
             if self.clear_plans_on_contact_change:
