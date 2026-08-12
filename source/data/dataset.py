@@ -494,6 +494,14 @@ class ImitationEpisodeDataset(Dataset):
         use_stain_mask: bool = False,
         stain_mask_key: str = "observations/images/stain_mask",
         resample_each_epoch: bool = False,
+        phase_resample_enable: bool = False,
+        phase_contact_on_thr: float = 3.0,
+        phase_contact_off_thr: float = 1.2,
+        phase_precontact_sec: float = 1.0,
+        dataset_hz: float = 30.0,
+        phase_weight_free: float = 1.0,
+        phase_weight_precontact: float = 5.0,
+        phase_weight_contact: float = 1.0,
     ):
         super().__init__()
         self.episode_paths = list(episode_paths)
@@ -517,6 +525,18 @@ class ImitationEpisodeDataset(Dataset):
         self.use_stain_mask = bool(use_stain_mask)
         self.stain_mask_key = str(stain_mask_key or "observations/images/stain_mask")
         self.resample_each_epoch = bool(resample_each_epoch)
+        # FACTR2/FIRST (arXiv:2606.12406): oversample pre-contact/contact
+        # start points instead of sampling chunk starts uniformly. Pre-
+        # contact = the phase_precontact_sec window immediately before each
+        # contact onset (hysteresis on measured fz, same on/off thresholds
+        # used at inference for contact detection).
+        self.phase_resample_enable = bool(phase_resample_enable)
+        self.phase_contact_on_thr = float(phase_contact_on_thr)
+        self.phase_contact_off_thr = float(phase_contact_off_thr)
+        self.phase_precontact_window = max(1, int(round(float(phase_precontact_sec) * float(dataset_hz))))
+        self.phase_weights_by_label = (
+            float(phase_weight_free), float(phase_weight_precontact), float(phase_weight_contact)
+        )
         if self.include_gripper:
             required_gripper_stats = (
                 "gripper_position_min",
@@ -549,7 +569,30 @@ class ImitationEpisodeDataset(Dataset):
         with self._epoch_shared.get_lock():
             self._epoch_shared.value = int(epoch)
 
-    def _choose_start(self, T: int, global_idx: int) -> int:
+    def _phase_labels(self, fz: np.ndarray) -> np.ndarray:
+        """0=free-space, 1=pre-contact, 2=contact, per timestep."""
+        T = fz.shape[0]
+        contact = np.zeros(T, dtype=bool)
+        active = False
+        for t in range(T):
+            if not active and fz[t] >= self.phase_contact_on_thr:
+                active = True
+            elif active and fz[t] <= self.phase_contact_off_thr:
+                active = False
+            contact[t] = active
+
+        label = np.where(contact, 2, 0).astype(np.int8)
+        onsets = np.flatnonzero(contact[1:] & ~contact[:-1]) + 1
+        if contact[0]:
+            onsets = np.concatenate(([0], onsets))
+        F = self.phase_precontact_window
+        for onset in onsets:
+            lo = max(0, onset - F)
+            seg = label[lo:onset]
+            seg[seg == 0] = 1
+        return label
+
+    def _choose_start(self, T: int, global_idx: int, force_fz: Optional[np.ndarray] = None) -> int:
         if T <= 1:
             return 0
         epoch = int(self._epoch_shared.value) if self.resample_each_epoch else 0
@@ -557,7 +600,17 @@ class ImitationEpisodeDataset(Dataset):
             self.seed + 1000003 * int(global_idx) + 9176 * epoch
         )
         max_start = max(0, T - 1)
-        return int(rng.integers(0, max_start + 1))
+        n_choices = max_start + 1
+        if not self.phase_resample_enable or force_fz is None:
+            return int(rng.integers(0, n_choices))
+
+        label = self._phase_labels(np.asarray(force_fz[:T], dtype=np.float64))[:n_choices]
+        w_by_label = np.asarray(self.phase_weights_by_label, dtype=np.float64)
+        weights = w_by_label[label]
+        total = float(weights.sum())
+        if total <= 0.0:
+            return int(rng.integers(0, n_choices))
+        return int(rng.choice(n_choices, p=weights / total))
 
     def __getitem__(self, idx: int):
         ep_i, _ = self.index[idx]
@@ -598,7 +651,7 @@ class ImitationEpisodeDataset(Dataset):
             if self.include_gripper:
                 gripper_position = gripper_position[:T]
                 gripper_current = gripper_current[:T]
-            start = self._choose_start(T, idx)
+            start = self._choose_start(T, idx, force_fz=force[:, 2] if force.shape[1] >= 3 else None)
 
             # Images use the frame at the current qpos time.
             imgs = []
@@ -723,6 +776,14 @@ def make_loaders(
     stain_mask_key: str = "observations/images/stain_mask",
     stain_mask_threshold: float = 0.5,
     resample_each_epoch: bool = False,
+    phase_resample_enable: bool = False,
+    phase_contact_on_thr: float = 3.0,
+    phase_contact_off_thr: float = 1.2,
+    phase_precontact_sec: float = 1.0,
+    dataset_hz: float = 30.0,
+    phase_weight_free: float = 1.0,
+    phase_weight_precontact: float = 5.0,
+    phase_weight_contact: float = 1.0,
 ):
     use_gripper_history = bool(use_gripper_history)
     gripper_history_len = max(1, int(gripper_history_len))
@@ -777,12 +838,20 @@ def make_loaders(
         gripper_history_len=gripper_history_len,
         use_stain_mask=use_stain_mask,
         stain_mask_key=stain_mask_key,
+        phase_contact_on_thr=phase_contact_on_thr,
+        phase_contact_off_thr=phase_contact_off_thr,
+        phase_precontact_sec=phase_precontact_sec,
+        dataset_hz=dataset_hz,
+        phase_weight_free=phase_weight_free,
+        phase_weight_precontact=phase_weight_precontact,
+        phase_weight_contact=phase_weight_contact,
     )
     train_ds = ImitationEpisodeDataset(
         train_paths,
         seq_len=seq_len_train,
         seed=seed,
         resample_each_epoch=resample_each_epoch,
+        phase_resample_enable=phase_resample_enable,
         **common,
     )
     val_ds = ImitationEpisodeDataset(
@@ -790,6 +859,7 @@ def make_loaders(
         seq_len=seq_len_val,
         seed=seed + 12345,
         resample_each_epoch=False,
+        phase_resample_enable=False,
         **common,
     )
 

@@ -152,6 +152,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resample_each_epoch", dest="resample_each_epoch", action="store_true", default=True)
     parser.add_argument("--no_resample_each_epoch", dest="resample_each_epoch", action="store_false")
 
+    # FACTR2/FIRST (arXiv:2606.12406): oversample pre-contact/contact chunk
+    # start points instead of uniform. Applied to the train split only.
+    parser.add_argument("--phase_resample_enable", action="store_true", default=False)
+    parser.add_argument("--phase_contact_on_thr", type=float, default=3.0)
+    parser.add_argument("--phase_contact_off_thr", type=float, default=1.2)
+    parser.add_argument("--phase_precontact_sec", type=float, default=1.0)
+    parser.add_argument("--phase_weight_free", type=float, default=1.0)
+    parser.add_argument("--phase_weight_precontact", type=float, default=5.0)
+    parser.add_argument("--phase_weight_contact", type=float, default=1.0)
+
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--pin_memory", dest="pin_memory", action="store_true", default=True)
     parser.add_argument("--no_pin_memory", dest="pin_memory", action="store_false")
@@ -473,7 +483,23 @@ def run_one(args, obs_mode: str, timestamp: Optional[str] = None):
         include_gripper=False,
         use_stain_mask=False,
         resample_each_epoch=args.resample_each_epoch,
+        phase_resample_enable=args.phase_resample_enable,
+        phase_contact_on_thr=args.phase_contact_on_thr,
+        phase_contact_off_thr=args.phase_contact_off_thr,
+        phase_precontact_sec=args.phase_precontact_sec,
+        dataset_hz=args.dataset_hz,
+        phase_weight_free=args.phase_weight_free,
+        phase_weight_precontact=args.phase_weight_precontact,
+        phase_weight_contact=args.phase_weight_contact,
     )
+    if args.phase_resample_enable:
+        print(
+            "[INFO] phase_resample     = enabled, on/off="
+            f"{args.phase_contact_on_thr}/{args.phase_contact_off_thr}N, "
+            f"precontact={args.phase_precontact_sec}s, "
+            f"weights(free,precontact,contact)="
+            f"({args.phase_weight_free},{args.phase_weight_precontact},{args.phase_weight_contact})"
+        )
     print(f"[INFO] data meta: {meta}")
 
     demo_start_stats = collect_demo_start_pose_stats(dataset_dir=dataset_dir, num_episodes=num_episodes)
