@@ -1219,6 +1219,18 @@ class NodeCmdMotionInfer(Node):
         self.declare_parameter("step_cap_pos_mm", 0.05)
         self.declare_parameter("step_cap_ang_rad", 0.0001)
         self.declare_parameter("step_cap_fz", 0.05)
+        # cmd_target[8] (fz) is kept at 0 through TRACK until real contact --
+        # letting the raw policy fz leak through pre-contact used to make
+        # force_control.cpp treat any |Fd|>0.01N as "desired_force_active"
+        # and drop z stiffness to 0 well before the sensor ever saw force,
+        # driving with a fixed 15N push independent of cmd_z entirely. But
+        # the model's raw (suppressed-before-publish) fz prediction rising is
+        # itself a signal that it believes contact is close, so use it only
+        # to slow the z-axis position rate -- not to command real force --
+        # for a controlled final approach instead of hitting the surface at
+        # full free-space speed.
+        self.declare_parameter("approach_slow_fz_thr", 0.5)
+        self.declare_parameter("approach_slow_step_cap_pos_mm", 0.015)
 
         self.declare_parameter("use_temporal_agg", True)
         self.declare_parameter("temporal_agg_mode", "exp")
@@ -1253,6 +1265,29 @@ class NodeCmdMotionInfer(Node):
         self.declare_parameter("preload_dz_max_mm", 0.08)
         self.declare_parameter("preload_tol_N", 0.2)
         self.declare_parameter("preload_max_descent_mm", 8.0)
+        # A PRELOAD exit right at the contact boundary can re-satisfy the
+        # touch debounce again within tens of ms (robot still in contact),
+        # repeatedly re-entering PRELOAD before force_control.cpp's mode
+        # transition (~0.2s time constants) ever finishes settling -- each
+        # interrupted transition stacks a new transient on the last, and the
+        # accumulating oscillation can blow up (20260812 02:29 FLOW: PRELOAD
+        # re-entered after 24ms/0.45s gaps, force grew 70->200N then spiked
+        # to -777N). Block re-entry for this long after any PRELOAD exit.
+        self.declare_parameter("preload_reentry_cooldown_sec", 0.8)
+
+        # TRACK executed as discrete blocking PTP9D (pose+force) service
+        # calls to singleArm_cmd instead of continuous 125Hz cmdMotion
+        # publish. Each call is a bounded, checked move -- no open-loop
+        # reference can drift ahead of the live pose between calls the way
+        # the continuous topic-interp path could, so this replaces PRELOAD/
+        # contact_z_descent_block/hold-anchor/approach-slowdown for TRACK
+        # entirely (all of that stays intact and unused as a fallback when
+        # this is off).
+        self.declare_parameter("track_use_ptp9d_service", True)
+        self.declare_parameter("ptp9d_waypoint_spacing_mm", 5.0)
+        self.declare_parameter("ptp9d_target_velocity_mm_s", 10.0)
+        self.declare_parameter("ptp9d_service_name", "/singleArm_cmd/single_arm_command")
+
         self.declare_parameter("press_force_cmd_mode", "target")  # keep|zero|target
         self.declare_parameter("press_hold_xy", True)
         self.declare_parameter("press_hold_rpy", True)
@@ -1688,6 +1723,10 @@ class NodeCmdMotionInfer(Node):
         self.step_cap_pos_mm = float(self.get_parameter("step_cap_pos_mm").value)
         self.step_cap_ang_rad = float(self.get_parameter("step_cap_ang_rad").value)
         self.step_cap_fz = float(self.get_parameter("step_cap_fz").value)
+        self.approach_slow_fz_thr = float(self.get_parameter("approach_slow_fz_thr").value)
+        self.approach_slow_step_cap_pos_mm = max(
+            1e-9, float(self.get_parameter("approach_slow_step_cap_pos_mm").value)
+        )
 
         self.use_temporal_agg = bool(self.get_parameter("use_temporal_agg").value)
         self.temporal_agg_mode = str(self.get_parameter("temporal_agg_mode").value).strip().lower()
@@ -1723,6 +1762,19 @@ class NodeCmdMotionInfer(Node):
         self.preload_max_descent_mm = max(
             0.0, float(self.get_parameter("preload_max_descent_mm").value)
         )
+        self.preload_reentry_cooldown_sec = max(
+            0.0, float(self.get_parameter("preload_reentry_cooldown_sec").value)
+        )
+        self.track_use_ptp9d_service = bool(
+            self.get_parameter("track_use_ptp9d_service").value
+        )
+        self.ptp9d_waypoint_spacing_mm = max(
+            1e-6, float(self.get_parameter("ptp9d_waypoint_spacing_mm").value)
+        )
+        self.ptp9d_target_velocity_mm_s = max(
+            0.0, float(self.get_parameter("ptp9d_target_velocity_mm_s").value)
+        )
+        self.ptp9d_service_name = str(self.get_parameter("ptp9d_service_name").value)
         self.press_force_cmd_mode = str(self.get_parameter("press_force_cmd_mode").value).strip().lower()
         self.press_hold_xy = bool(self.get_parameter("press_hold_xy").value)
         self.press_hold_rpy = bool(self.get_parameter("press_hold_rpy").value)
@@ -2174,6 +2226,11 @@ class NodeCmdMotionInfer(Node):
         self._contact_z_floor_mm: Optional[float] = None
         self._contact_z_block_count = 0
         self._preload_trigger_ok = 0
+        self._preload_last_exit_t = -1e9
+        self._approach_slow_active = False
+        self._ptp9d_track_active = False
+        self._ptp9d_inflight = False
+        self._ptp9d_last_target9: Optional[np.ndarray] = None
 
         self.stage = Stage.APPROACH
 
@@ -2253,8 +2310,11 @@ class NodeCmdMotionInfer(Node):
             self.pub_cmd = self.create_publisher(Float64MultiArray, self.cmd_topic, 10)
 
         self._ptp_client = None
-        if self.auto_move_to_demo_start and self.demo_start_use_ptp_service:
+        if (self.auto_move_to_demo_start and self.demo_start_use_ptp_service) or self.track_use_ptp9d_service:
             self._ptp_client = self.create_client(SingleArmCommand, self.ptp_service_name)
+        self._ptp9d_client = self._ptp_client
+        if self.track_use_ptp9d_service and self.ptp9d_service_name != self.ptp_service_name:
+            self._ptp9d_client = self.create_client(SingleArmCommand, self.ptp9d_service_name)
         if self.use_gripper and not self.visualization_only:
             self.pub_gripper_cmd = self.create_publisher(Int32, self.gripper_command_topic, 10)
             self.pub_gripper_goal_current = self.create_publisher(
@@ -4272,6 +4332,7 @@ class NodeCmdMotionInfer(Node):
         self.stage = Stage.TRACK
         self.plans.clear()
         self._anchor_ready = False
+        self._preload_last_exit_t = _monotonic()
 
         self._reset_dither()
         self._reset_kick_count()
@@ -4556,6 +4617,9 @@ class NodeCmdMotionInfer(Node):
             Plan(t0=_monotonic(), seq_den=seq_den, local_anchor_applied=local_anchor_applied)
         )
         self._infer_plan_count += 1
+
+        if self._ptp9d_track_active and self.stage == Stage.TRACK and not self._ptp9d_inflight:
+            self._ptp9d_advance()
 
         # Optional Grad-CAM debug visualization. This performs a separate backward pass
         # at a low rate, so the control loop and command generation remain unchanged.
@@ -5093,6 +5157,7 @@ class NodeCmdMotionInfer(Node):
         self._contact_z_floor_mm = None
         self._touch_ok = 0
         self._preload_trigger_ok = 0
+        self._preload_last_exit_t = -1e9
 
         self._fz_base = 0.0
         self._fz_base_init = False
@@ -5118,6 +5183,9 @@ class NodeCmdMotionInfer(Node):
         self._infer_wait_last_log = 0.0
         self._ctrl_no_plan_last_log = 0.0
         self._infer_plan_count = 0
+
+        self._ptp9d_track_active = self.track_use_ptp9d_service
+        self._ptp9d_inflight = False
 
     def _start_ptp_alignment(self, pose6_now: np.ndarray):
         """
@@ -5259,6 +5327,124 @@ class NodeCmdMotionInfer(Node):
             f"{np.array2string(pose6_now, precision=3, separator=', ')} -- "
             "stage=TRACK, resuming policy control."
         )
+
+    def _ptp9d_advance(self):
+        """
+        Drive TRACK as a chain of discrete, blocking PTP9D (pose+force)
+        service calls instead of continuous 125Hz cmdMotion streaming. Each
+        call is a single bounded (~ptp9d_waypoint_spacing_mm) move that must
+        finish before the next is issued, so no open-loop reference can ever
+        run ahead of the live pose between calls the way the continuous
+        topic-interp path could -- this replaces PRELOAD/hold-anchor/
+        approach-slowdown for TRACK entirely rather than layering on top.
+        Re-entrant-safe: called from both the infer timer (new plan arrived)
+        and the previous call's own done-callback (chain to the next point).
+        """
+        if not (self._ptp9d_track_active and self.stage == Stage.TRACK):
+            return
+        if self._ptp9d_inflight:
+            return
+        if not self.plans:
+            return  # no inference result yet; retried once one arrives
+
+        with self._lock:
+            pose6 = None if self._pose6 is None else self._pose6.copy()
+            force = None if self._force is None else self._force.copy()
+        if pose6 is None:
+            return
+
+        # _on_control_timer returns before reaching _update_contact() for
+        # this whole stage (guard added above it), so self._contact was
+        # frozen at whatever it was on TRACK entry -- permanently False,
+        # forcing fz=0 below even after real contact. Update it here so
+        # contact is actually recognized once it happens (20260812 04:36
+        # BSPLINE: descended to ~178mm, real contact height, then oscillated
+        # up/down forever because fz stayed force-suppressed the whole time).
+        meas_fz = float(force[2]) if (force is not None and force.size >= 3) else 0.0
+        self._update_contact(meas_fz)
+
+        seq = self.plans[-1].seq_den
+        if seq.shape[0] == 0:
+            return
+
+        pos_now = pose6[:3].astype(np.float64)
+        dists_to_now = np.linalg.norm(seq[:, :3].astype(np.float64) - pos_now[None, :], axis=1)
+        start_idx = int(np.argmin(dists_to_now))
+
+        target_idx = start_idx
+        acc_mm = 0.0
+        for i in range(start_idx + 1, seq.shape[0]):
+            acc_mm += float(np.linalg.norm(seq[i, :3] - seq[i - 1, :3]))
+            target_idx = i
+            if acc_mm >= self.ptp9d_waypoint_spacing_mm:
+                break
+
+        target = seq[target_idx].astype(np.float64)
+        # Same premature force-mode hijack as the continuous topic path:
+        # PTP9D always switches to Force mode, and force_control.cpp treats
+        # any |Fd|>0.01N as desired_force_active -- with no real contact yet
+        # (actual_force_active false) that drops stiffness to 0 and drives
+        # with a fixed +-15N precontact hold, ignoring the requested xyz
+        # entirely. Keep fz at 0 until real contact is confirmed so PTP9D
+        # calls stay pure position moves (Fd=0 -> full stiffness) pre-contact
+        # (20260812 04:15 PTP9D run: -3.13N on the very first waypoint,
+        # robot never reached the requested z, "flailing" in the air).
+        fz = float(target[8]) if self._contact else 0.0
+        if self.fz_hard_limit > 0.0:
+            fz = float(np.clip(fz, -self.fz_hard_limit, self.fz_hard_limit))
+
+        if self._ptp9d_client is None or not self._ptp9d_client.service_is_ready():
+            self.get_logger().error(
+                f"[PTP9D] service '{self.ptp9d_service_name}' not available -- "
+                "will retry once the next plan arrives."
+            )
+            return
+
+        req = SingleArmCommand.Request()
+        req.command_mode = "PTP9D"
+        req.target_pose = [
+            float(target[0]), float(target[1]), float(target[2]),
+            float(np.degrees(target[3])),
+            float(np.degrees(target[4])),
+            float(np.degrees(target[5])),
+            float(target[6]), float(target[7]), fz,
+        ]
+        req.target_velocity = float(self.ptp9d_target_velocity_mm_s)
+
+        self._ptp9d_inflight = True
+        self.get_logger().info(
+            f"[PTP9D] -> idx={target_idx}/{seq.shape[0]-1} "
+            f"xyz=[{target[0]:.2f},{target[1]:.2f},{target[2]:.2f}]mm fz={fz:.2f}N"
+        )
+        # cmd9 logged here is the requested target, not what _publish_cmd
+        # would have sent (this path never calls it) -- still gives the
+        # same meas-vs-cmd trail in the CSV, just one row per PTP9D call
+        # instead of one per 8ms control tick.
+        target9 = target.copy()
+        target9[8] = fz
+        self._log_metrics_row(target9.astype(np.float32), False)
+        self._ptp9d_last_target9 = target9
+
+        future = self._ptp9d_client.call_async(req)
+        future.add_done_callback(self._on_ptp9d_step_done)
+
+    def _on_ptp9d_step_done(self, future):
+        self._ptp9d_inflight = False
+
+        try:
+            resp = future.result()
+        except Exception as exc:
+            self.get_logger().error(f"[PTP9D] service call raised: {exc}")
+            return
+
+        if not resp.success:
+            self.get_logger().error(f"[PTP9D] step failed: {resp.message}")
+            return
+
+        if self._ptp9d_last_target9 is not None:
+            self._log_metrics_row(self._ptp9d_last_target9.astype(np.float32), False)
+
+        self._ptp9d_advance()
 
     def _run_demo_start_alignment(self, pose6: np.ndarray, now_t: float):
         """
@@ -5499,6 +5685,13 @@ class NodeCmdMotionInfer(Node):
         if self.flow_diagnostic_only:
             return
 
+        if self._ptp9d_track_active and self.stage == Stage.TRACK:
+            # PTP9D drives TRACK entirely via its own async service-call
+            # chain (see _ptp9d_advance/_on_ptp9d_step_done) -- publishing
+            # anything from here would race PTP9D_command_gen's own stream
+            # to cmdMotion on the same topic.
+            return
+
         # Debounce PRELOAD entry from TRACK: a single noisy tick crossing
         # contact_on_thr used to be enough to commit to a multi-second
         # PRELOAD hunt. Because preload_dz_max_mm saturates to its max rate
@@ -5516,7 +5709,14 @@ class NodeCmdMotionInfer(Node):
                 self._preload_trigger_ok = 0
             if self._preload_trigger_ok >= self.touch_ok_count:
                 self._preload_trigger_ok = 0
-                self._enter_preload(pose6.astype(np.float32))
+                since_exit = now_t - self._preload_last_exit_t
+                if since_exit >= self.preload_reentry_cooldown_sec:
+                    self._enter_preload(pose6.astype(np.float32))
+                else:
+                    self.get_logger().warn(
+                        f"[PRELOAD] re-entry suppressed ({since_exit:.3f}s < "
+                        f"{self.preload_reentry_cooldown_sec:.2f}s cooldown since last exit)"
+                    )
 
         changed = self._update_contact(meas_fz)
         if changed:
@@ -5617,6 +5817,16 @@ class NodeCmdMotionInfer(Node):
                 cmd_target[6] = 0.0
                 cmd_target[7] = 0.0
                 cmd_target[8] = 0.0
+
+            if self.stage == Stage.TRACK and not self._contact:
+                # Keep fz at 0 (no premature force-mode hijack) but use the
+                # model's own raw fz prediction -- which rises as it expects
+                # contact soon -- to slow just the z position rate for a
+                # controlled final approach.
+                self._approach_slow_active = float(cmd_target[8]) >= self.approach_slow_fz_thr
+                cmd_target[8] = 0.0
+            else:
+                self._approach_slow_active = False
 
             if self.stage == Stage.RELEASE:
                 cmd_target = self._release_force(cmd_target)
@@ -5783,10 +5993,15 @@ class NodeCmdMotionInfer(Node):
         d = (cmd_target - self.prev_cmd).astype(np.float32)
         d = (beta * d).astype(np.float32)
 
+        cap_pos_z = cap_pos
+        if self._approach_slow_active and self.stage == Stage.TRACK:
+            cap_pos_z = max(1e-9, self.approach_slow_step_cap_pos_mm * ramp)
+
         for i in range(3):
             di = float(d[i])
-            if abs(di) > cap_pos:
-                d[i] = float(np.sign(di) * cap_pos)
+            this_cap = cap_pos_z if i == 2 else cap_pos
+            if abs(di) > this_cap:
+                d[i] = float(np.sign(di) * this_cap)
         for i in range(3, 6):
             di = float(d[i])
             if abs(di) > cap_ang:
