@@ -68,6 +68,8 @@ def generate_launch_description():
     ptp9d_use_stream = LaunchConfiguration("ptp9d_use_stream")
     ptp9d_stream_topup_points = LaunchConfiguration("ptp9d_stream_topup_points")
     ptp9d_stream_min_lookahead_sec = LaunchConfiguration("ptp9d_stream_min_lookahead_sec")
+    ptp9d_stream_smooth_window = LaunchConfiguration("ptp9d_stream_smooth_window")
+    ptp9d_stream_stride = LaunchConfiguration("ptp9d_stream_stride")
     ptp9d_target_velocity_mm_s = LaunchConfiguration("ptp9d_target_velocity_mm_s")
     auto_move_to_demo_start = LaunchConfiguration("auto_move_to_demo_start")
     demo_start_move_sec = LaunchConfiguration("demo_start_move_sec")
@@ -205,6 +207,13 @@ def generate_launch_description():
         DeclareLaunchArgument("ptp9d_use_stream", default_value="false"),
         DeclareLaunchArgument("ptp9d_stream_topup_points", default_value="20"),
         DeclareLaunchArgument("ptp9d_stream_min_lookahead_sec", default_value="1.0"),
+        # Smooths position/orientation (not force) before each streamed
+        # segment is chosen -- without this the stream thread chases raw
+        # per-sample prediction noise point by point (visibly oscillated in
+        # the first live test). stride skips raw samples so fewer, less
+        # noisy points need to be visited.
+        DeclareLaunchArgument("ptp9d_stream_smooth_window", default_value="5"),
+        DeclareLaunchArgument("ptp9d_stream_stride", default_value="2"),
         DeclareLaunchArgument("ptp9d_target_velocity_mm_s", default_value="10.0"),
         DeclareLaunchArgument("auto_move_to_demo_start", default_value="true"),
         DeclareLaunchArgument("demo_start_move_sec", default_value="5.0"),
@@ -383,6 +392,12 @@ def generate_launch_description():
                 ),
                 "ptp9d_stream_min_lookahead_sec": ParameterValue(
                     ptp9d_stream_min_lookahead_sec, value_type=float
+                ),
+                "ptp9d_stream_smooth_window": ParameterValue(
+                    ptp9d_stream_smooth_window, value_type=int
+                ),
+                "ptp9d_stream_stride": ParameterValue(
+                    ptp9d_stream_stride, value_type=int
                 ),
                 "ptp9d_target_velocity_mm_s": ParameterValue(
                     ptp9d_target_velocity_mm_s, value_type=float

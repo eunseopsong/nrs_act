@@ -1301,6 +1301,16 @@ class NodeCmdMotionInfer(Node):
         self.declare_parameter("ptp9d_use_stream", False)
         self.declare_parameter("ptp9d_stream_topup_points", 20)
         self.declare_parameter("ptp9d_stream_min_lookahead_sec", 1.0)
+        # The robot-side stream thread rate-limits toward and pops every
+        # single point it's given -- unlike the batch path, there is no
+        # MotionBlender9D accel-decel profile to smooth over per-sample
+        # prediction noise, so raw consecutive 30Hz waypoints get chased
+        # exactly as given (20260815 first live test: visibly oscillated).
+        # smooth_window applies a centered moving average to position/
+        # orientation (not force) before each segment is chosen; stride
+        # skips samples so fewer, less noisy points need to be visited.
+        self.declare_parameter("ptp9d_stream_smooth_window", 5)
+        self.declare_parameter("ptp9d_stream_stride", 2)
         self.declare_parameter("ptp9d_target_velocity_mm_s", 10.0)
         self.declare_parameter("ptp9d_service_name", "/singleArm_cmd/single_arm_command")
 
@@ -1796,6 +1806,12 @@ class NodeCmdMotionInfer(Node):
         )
         self.ptp9d_stream_min_lookahead_sec = max(
             0.05, float(self.get_parameter("ptp9d_stream_min_lookahead_sec").value)
+        )
+        self.ptp9d_stream_smooth_window = max(
+            1, int(self.get_parameter("ptp9d_stream_smooth_window").value)
+        )
+        self.ptp9d_stream_stride = max(
+            1, int(self.get_parameter("ptp9d_stream_stride").value)
         )
         self.ptp9d_target_velocity_mm_s = max(
             0.0, float(self.get_parameter("ptp9d_target_velocity_mm_s").value)
@@ -5568,6 +5584,20 @@ class NodeCmdMotionInfer(Node):
     # single call finishes.
     # ------------------------------------------------------------
 
+    @staticmethod
+    def _smooth_columns_ma(arr: np.ndarray, window: int) -> np.ndarray:
+        """Centered moving average per column, edge-padded to keep arr's length."""
+        if window <= 1 or arr.shape[0] < 2:
+            return arr
+        window = min(window, arr.shape[0])
+        half = window // 2
+        padded = np.pad(arr, ((half, window - 1 - half), (0, 0)), mode="edge")
+        kernel = np.ones(window, dtype=np.float64) / window
+        out = np.empty_like(arr)
+        for c in range(arr.shape[1]):
+            out[:, c] = np.convolve(padded[:, c], kernel, mode="valid")
+        return out
+
     def _ptp9d_stream_start(self):
         if self._ptp9d_client is None:
             self.get_logger().error(
@@ -5626,9 +5656,18 @@ class NodeCmdMotionInfer(Node):
         if not self.plans:
             return
 
-        seq = self.plans[-1].seq_den
-        if seq.shape[0] == 0:
+        seq_raw = self.plans[-1].seq_den
+        if seq_raw.shape[0] == 0:
             return
+
+        # Smooth position/orientation only (not force -- that's handled by
+        # the contact-gated suppression right below) so the stream doesn't
+        # chase raw per-sample prediction noise point by point the way the
+        # first live test did; the batch/blended PTP9D path never had this
+        # problem because MotionBlender9D fits one smooth accel-decel curve
+        # across a whole segment instead of visiting every raw sample.
+        seq = seq_raw.astype(np.float64).copy()
+        seq[:, :6] = self._smooth_columns_ma(seq[:, :6], self.ptp9d_stream_smooth_window)
 
         if self._ptp9d_stream_tail9 is None:
             with self._lock:
@@ -5639,17 +5678,18 @@ class NodeCmdMotionInfer(Node):
         else:
             anchor_xyz = self._ptp9d_stream_tail9[:3].astype(np.float64)
 
-        dists = np.linalg.norm(seq[:, :3].astype(np.float64) - anchor_xyz[None, :], axis=1)
+        dists = np.linalg.norm(seq[:, :3] - anchor_xyz[None, :], axis=1)
         anchor_idx = int(np.argmin(dists))
-        lo = min(anchor_idx + 1, seq.shape[0] - 1)
-        hi = min(lo + self.ptp9d_stream_topup_points, seq.shape[0])
-        segment_idx = list(range(lo, hi))
+        stride = self.ptp9d_stream_stride
+        lo = min(anchor_idx + stride, seq.shape[0] - 1)
+        hi = min(lo + stride * self.ptp9d_stream_topup_points, seq.shape[0])
+        segment_idx = list(range(lo, hi, stride))
         if not segment_idx:
             # Already at the end of this plan's horizon -- nothing new to
             # append until the next inference plan arrives.
             return
 
-        segment = seq[segment_idx].astype(np.float64)
+        segment = seq[segment_idx]
         # Same premature force-mode hijack as _ptp9d_advance/topic-publish:
         # keep fz at 0 pre-contact so the streamed points stay pure position
         # moves (Fd=0 -> full stiffness) until real contact is confirmed.
@@ -5689,7 +5729,7 @@ class NodeCmdMotionInfer(Node):
         # relying on the buffer running dry would delay contact response.
         self._ptp9d_stream_committed_until_t = max(
             self._ptp9d_stream_committed_until_t, now_t
-        ) + len(segment_idx) / max(1e-6, self.trajectory_hz)
+        ) + (len(segment_idx) * stride) / max(1e-6, self.trajectory_hz)
 
         def _on_append_done(future):
             self._ptp9d_stream_topup_inflight = False
