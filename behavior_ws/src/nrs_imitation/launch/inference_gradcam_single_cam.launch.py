@@ -62,6 +62,10 @@ def generate_launch_description():
     orientation_lock_wx = LaunchConfiguration("orientation_lock_wx")
     orientation_lock_wy = LaunchConfiguration("orientation_lock_wy")
     orientation_lock_wz = LaunchConfiguration("orientation_lock_wz")
+    track_use_ptp9d_service = LaunchConfiguration("track_use_ptp9d_service")
+    ptp9d_segment_points = LaunchConfiguration("ptp9d_segment_points")
+    ptp9d_segment_stride = LaunchConfiguration("ptp9d_segment_stride")
+    ptp9d_target_velocity_mm_s = LaunchConfiguration("ptp9d_target_velocity_mm_s")
     auto_move_to_demo_start = LaunchConfiguration("auto_move_to_demo_start")
     demo_start_move_sec = LaunchConfiguration("demo_start_move_sec")
     demo_start_hold_sec = LaunchConfiguration("demo_start_hold_sec")
@@ -179,6 +183,19 @@ def generate_launch_description():
         DeclareLaunchArgument("orientation_lock_wx", default_value="0.0"),
         DeclareLaunchArgument("orientation_lock_wy", default_value="0.0"),
         DeclareLaunchArgument("orientation_lock_wz", default_value="1.5707963268"),
+        # true  = TRACK stage drives the robot via discrete PTP9D service
+        #         calls (safe, default -- see _ptp9d_advance/_on_ptp9d_step_done).
+        # false = TRACK stage streams continuous 9D commands directly onto
+        #         cmd_topic at control_hz (legacy topic-publish path).
+        DeclareLaunchArgument("track_use_ptp9d_service", default_value="true"),
+        # Each PTP9D call carries this many consecutive lookahead waypoints
+        # (spaced ptp9d_segment_stride raw samples apart) blended into one
+        # continuous robot-side motion instead of stopping at every point --
+        # more points/call means fewer calls and smoother motion, at the
+        # cost of coarser per-call contact/safety re-evaluation.
+        DeclareLaunchArgument("ptp9d_segment_points", default_value="15"),
+        DeclareLaunchArgument("ptp9d_segment_stride", default_value="1"),
+        DeclareLaunchArgument("ptp9d_target_velocity_mm_s", default_value="10.0"),
         DeclareLaunchArgument("auto_move_to_demo_start", default_value="true"),
         DeclareLaunchArgument("demo_start_move_sec", default_value="5.0"),
         DeclareLaunchArgument("demo_start_hold_sec", default_value="2.0"),
@@ -338,6 +355,18 @@ def generate_launch_description():
                 ),
                 "orientation_lock_wz": ParameterValue(
                     orientation_lock_wz, value_type=float
+                ),
+                "track_use_ptp9d_service": ParameterValue(
+                    track_use_ptp9d_service, value_type=bool
+                ),
+                "ptp9d_segment_points": ParameterValue(
+                    ptp9d_segment_points, value_type=int
+                ),
+                "ptp9d_segment_stride": ParameterValue(
+                    ptp9d_segment_stride, value_type=int
+                ),
+                "ptp9d_target_velocity_mm_s": ParameterValue(
+                    ptp9d_target_velocity_mm_s, value_type=float
                 ),
                 "auto_move_to_demo_start": ParameterValue(
                     auto_move_to_demo_start, value_type=bool

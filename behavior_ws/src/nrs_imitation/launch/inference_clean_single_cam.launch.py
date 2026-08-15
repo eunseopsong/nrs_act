@@ -4,7 +4,11 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    LaunchConfiguration,
+    PathJoinSubstitution,
+    PythonExpression,
+)
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -22,6 +26,13 @@ def generate_launch_description():
     metrics_log_dir = LaunchConfiguration("metrics_log_dir")
     metrics_run_tag = LaunchConfiguration("metrics_run_tag")
     use_stain_mask = LaunchConfiguration("use_stain_mask")
+    ptp9d_segment_points = LaunchConfiguration("ptp9d_segment_points")
+    ptp9d_segment_stride = LaunchConfiguration("ptp9d_segment_stride")
+    ptp9d_target_velocity_mm_s = LaunchConfiguration("ptp9d_target_velocity_mm_s")
+    inference_mode = LaunchConfiguration("inference_mode")
+    track_use_ptp9d_service = PythonExpression(
+        ["'true' if '", inference_mode, "' == 'service_call' else 'false'"]
+    )
 
     base_launch = PathJoinSubstitution(
         [FindPackageShare("nrs_imitation"), "launch", "inference_gradcam_single_cam.launch.py"]
@@ -60,6 +71,25 @@ def generate_launch_description():
             # use_stain_mask:=false for those or inference_core refuses to
             # start (use_stain_mask mismatch: checkpoint vs inference_arg).
             DeclareLaunchArgument("use_stain_mask", default_value="true"),
+            # service_call (default) = TRACK stage drives the robot via
+            # discrete PTP9D service calls (safe -- see
+            # _ptp9d_advance/_on_ptp9d_step_done in inference_core.py).
+            # topic_publish = legacy continuous 9D command streaming
+            # directly onto cmd_topic at control_hz.
+            DeclareLaunchArgument(
+                "inference_mode",
+                default_value="service_call",
+                choices=["service_call", "topic_publish"],
+            ),
+            # Each PTP9D call now carries ptp9d_segment_points consecutive
+            # lookahead waypoints (ptp9d_segment_stride raw samples apart),
+            # blended into one continuous robot-side motion instead of
+            # stopping fully at every point. Raise segment_points for
+            # smoother/less "stop-start" motion at the cost of coarser
+            # per-call contact/safety re-evaluation.
+            DeclareLaunchArgument("ptp9d_segment_points", default_value="15"),
+            DeclareLaunchArgument("ptp9d_segment_stride", default_value="1"),
+            DeclareLaunchArgument("ptp9d_target_velocity_mm_s", default_value="10.0"),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(base_launch),
                 launch_arguments={
@@ -86,6 +116,10 @@ def generate_launch_description():
                     "cmd_safety_enable": "true",
                     # Match the checkpoint's observation construction.
                     "use_stain_mask": use_stain_mask,
+                    "track_use_ptp9d_service": track_use_ptp9d_service,
+                    "ptp9d_segment_points": ptp9d_segment_points,
+                    "ptp9d_segment_stride": ptp9d_segment_stride,
+                    "ptp9d_target_velocity_mm_s": ptp9d_target_velocity_mm_s,
                     "auto_stain_mask": "true",
                     "stain_mask_mode": "tcp_roi",
                     "tcp_roi_reference_width": "424",

@@ -1284,7 +1284,13 @@ class NodeCmdMotionInfer(Node):
         # entirely (all of that stays intact and unused as a fallback when
         # this is off).
         self.declare_parameter("track_use_ptp9d_service", True)
-        self.declare_parameter("ptp9d_waypoint_spacing_mm", 5.0)
+        # Each PTP9D call now carries a short lookahead segment of
+        # consecutive predicted waypoints (not one point) so the robot-side
+        # blender (Y2RobMotion PTP9D_command_gen -> MotionBlender9D) can
+        # ramp through them as one continuous motion instead of stopping
+        # fully between every point.
+        self.declare_parameter("ptp9d_segment_points", 15)
+        self.declare_parameter("ptp9d_segment_stride", 1)
         self.declare_parameter("ptp9d_target_velocity_mm_s", 10.0)
         self.declare_parameter("ptp9d_service_name", "/singleArm_cmd/single_arm_command")
 
@@ -1768,8 +1774,11 @@ class NodeCmdMotionInfer(Node):
         self.track_use_ptp9d_service = bool(
             self.get_parameter("track_use_ptp9d_service").value
         )
-        self.ptp9d_waypoint_spacing_mm = max(
-            1e-6, float(self.get_parameter("ptp9d_waypoint_spacing_mm").value)
+        self.ptp9d_segment_points = max(
+            1, int(self.get_parameter("ptp9d_segment_points").value)
+        )
+        self.ptp9d_segment_stride = max(
+            1, int(self.get_parameter("ptp9d_segment_stride").value)
         )
         self.ptp9d_target_velocity_mm_s = max(
             0.0, float(self.get_parameter("ptp9d_target_velocity_mm_s").value)
@@ -3016,8 +3025,13 @@ class NodeCmdMotionInfer(Node):
             2,
             cv2.LINE_AA,
         )
+        method_label = (
+            "batched FLOW velocity change at t=0.5"
+            if self.policy_class == "FLOW"
+            else "batched BSPLINE trajectory change"
+        )
         subtitle = (
-            f"batched FLOW velocity change at t=0.5 | target={self.modality_importance_target} "
+            f"{method_label} | target={self.modality_importance_target} "
             f"steps={self.modality_importance_target_step}:"
             f"{self.modality_importance_target_step + self.modality_importance_target_horizon}"
         )
@@ -3151,16 +3165,28 @@ class NodeCmdMotionInfer(Node):
         gripper_current_t: Optional[torch.Tensor] = None,
         gripper_history_t: Optional[torch.Tensor] = None,
     ) -> bool:
-        if self.policy_class != "FLOW":
+        if self.policy_class not in ("FLOW", "BSPLINE"):
             if self._modality_importance_fail_count == 0:
                 self.get_logger().warn(
-                    "[MODALITY] fast modality attribution currently supports FLOW only"
+                    "[MODALITY] fast modality attribution currently supports FLOW/BSPLINE only"
                 )
             self._modality_importance_fail_count += 1
             return False
-        if not hasattr(self.policy, "_condition") or not hasattr(self.policy, "velocity_net"):
+        if self.policy_class == "FLOW" and not (
+            hasattr(self.policy, "_condition") and hasattr(self.policy, "velocity_net")
+        ):
             self.get_logger().warn(
                 "[MODALITY] FLOW policy does not expose _condition/velocity_net"
+            )
+            return False
+        if self.policy_class == "BSPLINE" and not (
+            hasattr(self.policy, "_condition")
+            and hasattr(self.policy, "control_head")
+            and hasattr(self.policy, "trajectory_basis")
+        ):
+            self.get_logger().warn(
+                "[MODALITY] BSPLINE policy does not expose "
+                "_condition/control_head/trajectory_basis"
             )
             return False
 
@@ -3270,18 +3296,19 @@ class NodeCmdMotionInfer(Node):
                     4, *([1] * (gripper_history_t.dim() - 1))
                 )
 
-            if flow_initial_noise_t is None:
-                z_base = torch.zeros(
-                    (1, self.chunk_size, self.action_dim),
-                    dtype=q_base.dtype,
-                    device=q_base.device,
+            if self.policy_class == "FLOW":
+                if flow_initial_noise_t is None:
+                    z_base = torch.zeros(
+                        (1, self.chunk_size, self.action_dim),
+                        dtype=q_base.dtype,
+                        device=q_base.device,
+                    )
+                else:
+                    z_base = flow_initial_noise_t.detach()
+                z_batch = z_base.repeat(4, 1, 1)
+                t_batch = torch.full(
+                    (4,), 0.5, dtype=q_base.dtype, device=q_base.device
                 )
-            else:
-                z_base = flow_initial_noise_t.detach()
-            z_batch = z_base.repeat(4, 1, 1)
-            t_batch = torch.full(
-                (4,), 0.5, dtype=q_base.dtype, device=q_base.device
-            )
 
             start_t = _monotonic()
             with torch.inference_mode():
@@ -3298,17 +3325,26 @@ class NodeCmdMotionInfer(Node):
                     force_history=force_batch,
                     stain_mask=mask_batch,
                 )
-                velocity_batch = self.policy.velocity_net(
-                    sample=z_batch,
-                    t=t_batch,
-                    global_cond=cond_batch,
-                )
+                if self.policy_class == "FLOW":
+                    # Velocity field at t=0.5 stands in for the action the
+                    # policy would ultimately integrate to -- cheap proxy,
+                    # no need to run the full flow-matching sampler.
+                    output_batch = self.policy.velocity_net(
+                        sample=z_batch,
+                        t=t_batch,
+                        global_cond=cond_batch,
+                    )
+                else:
+                    # BSPLINE has no iterative sampler: control points ->
+                    # trajectory is the actual (single-pass) action output.
+                    control_points_batch = self.policy.control_head(cond_batch)
+                    output_batch = self.policy.trajectory_basis(control_points_batch)
             compute_ms = 1000.0 * (_monotonic() - start_t)
 
-            reference_block = _target_block(velocity_batch[0])
+            reference_block = _target_block(output_batch[0])
             raw_scores = []
             for idx in (1, 2, 3):
-                delta = _target_block(velocity_batch[idx]) - reference_block
+                delta = _target_block(output_batch[idx]) - reference_block
                 raw_scores.append(
                     float(torch.sqrt(torch.mean(delta.float().square()) + 1e-24).cpu())
                 )
@@ -3422,8 +3458,8 @@ class NodeCmdMotionInfer(Node):
         m_dv_dx = float(self.flow_vector_overlay_m_dv_dx)
         m_dv_dy = float(self.flow_vector_overlay_m_dv_dy)
 
-        # TCP-centered square ROI used by this checkpoint (10% image area).
-        roi_side = max(1, int(round(math.sqrt(0.10 * float(width * height)))))
+        # TCP-centered square ROI used by this checkpoint.
+        roi_side = max(1, int(round(math.sqrt(self.tcp_roi_area_fraction * float(width * height)))))
         roi_x0 = int(np.clip(cx - roi_side // 2, 0, max(0, width - roi_side)))
         roi_y0 = int(np.clip(cy - roi_side // 2, 0, max(0, height - roi_side)))
         cv2.rectangle(
@@ -3883,6 +3919,25 @@ class NodeCmdMotionInfer(Node):
                 args_override["image_backbone"] = "resnet18"
             args_override["pretrained_backbone"] = False
             args_override["dino_checkpoint_path"] = ""
+
+            # The launch file only forwards tcp_roi_* to stain_mask_publisher,
+            # not to this node -- self.tcp_roi_* would otherwise stay stuck at
+            # the ROS parameter default (e.g. 0.10) instead of the checkpoint's
+            # true training-time value used above to build the policy. Sync
+            # them here so the flow-vector overlay box always matches what the
+            # model actually attends to.
+            if "use_tcp_roi" in args_override:
+                self.use_tcp_roi = bool(args_override["use_tcp_roi"])
+            if "tcp_roi_reference_width" in args_override:
+                self.tcp_roi_reference_width = int(args_override["tcp_roi_reference_width"])
+            if "tcp_roi_reference_height" in args_override:
+                self.tcp_roi_reference_height = int(args_override["tcp_roi_reference_height"])
+            if "tcp_roi_center_x" in args_override:
+                self.tcp_roi_center_x = int(args_override["tcp_roi_center_x"])
+            if "tcp_roi_center_y" in args_override:
+                self.tcp_roi_center_y = int(args_override["tcp_roi_center_y"])
+            if "tcp_roi_area_fraction" in args_override:
+                self.tcp_roi_area_fraction = float(args_override["tcp_roi_area_fraction"])
 
         if self.use_gripper:
             try:
@@ -5332,13 +5387,18 @@ class NodeCmdMotionInfer(Node):
         """
         Drive TRACK as a chain of discrete, blocking PTP9D (pose+force)
         service calls instead of continuous 125Hz cmdMotion streaming. Each
-        call is a single bounded (~ptp9d_waypoint_spacing_mm) move that must
-        finish before the next is issued, so no open-loop reference can ever
-        run ahead of the live pose between calls the way the continuous
-        topic-interp path could -- this replaces PRELOAD/hold-anchor/
-        approach-slowdown for TRACK entirely rather than layering on top.
+        call carries a short lookahead segment of ptp9d_segment_points
+        consecutive predicted waypoints (not just one), which the robot-side
+        blender (Y2RobMotion PTP9D_command_gen -> MotionBlender9D) ramps
+        through as a single continuous motion instead of decelerating to a
+        full stop at every point -- fixes the "stop-start" choppy feel of
+        one-point-per-call while keeping each call bounded/verifiable (no
+        open-loop reference can run arbitrarily far ahead of the live pose
+        between calls the way the continuous topic-interp path could). This
+        replaces PRELOAD/hold-anchor/approach-slowdown for TRACK entirely
+        rather than layering on top.
         Re-entrant-safe: called from both the infer timer (new plan arrived)
-        and the previous call's own done-callback (chain to the next point).
+        and the previous call's own done-callback (chain to the next segment).
         """
         if not (self._ptp9d_track_active and self.stage == Stage.TRACK):
             return
@@ -5371,15 +5431,21 @@ class NodeCmdMotionInfer(Node):
         dists_to_now = np.linalg.norm(seq[:, :3].astype(np.float64) - pos_now[None, :], axis=1)
         start_idx = int(np.argmin(dists_to_now))
 
-        target_idx = start_idx
-        acc_mm = 0.0
-        for i in range(start_idx + 1, seq.shape[0]):
-            acc_mm += float(np.linalg.norm(seq[i, :3] - seq[i - 1, :3]))
-            target_idx = i
-            if acc_mm >= self.ptp9d_waypoint_spacing_mm:
-                break
+        # Consecutive (not distance-walked) indices, spaced by
+        # ptp9d_segment_stride raw samples -- a fixed lookahead window into
+        # the near-term predicted trajectory, so this can never skip ahead
+        # to a stale, low-confidence point near the far end of the chunk the
+        # way distance-accumulation could in slow-motion (e.g. near-contact
+        # hover) regions.
+        last_idx = min(
+            seq.shape[0] - 1,
+            start_idx + self.ptp9d_segment_stride * self.ptp9d_segment_points,
+        )
+        segment_idx = list(range(start_idx + self.ptp9d_segment_stride, last_idx + 1, self.ptp9d_segment_stride))
+        if not segment_idx:
+            segment_idx = [min(start_idx + 1, seq.shape[0] - 1)]
 
-        target = seq[target_idx].astype(np.float64)
+        segment = seq[segment_idx].astype(np.float64)
         # Same premature force-mode hijack as the continuous topic path:
         # PTP9D always switches to Force mode, and force_control.cpp treats
         # any |Fd|>0.01N as desired_force_active -- with no real contact yet
@@ -5389,9 +5455,13 @@ class NodeCmdMotionInfer(Node):
         # calls stay pure position moves (Fd=0 -> full stiffness) pre-contact
         # (20260812 04:15 PTP9D run: -3.13N on the very first waypoint,
         # robot never reached the requested z, "flailing" in the air).
-        fz = float(target[8]) if self._contact else 0.0
-        if self.fz_hard_limit > 0.0:
-            fz = float(np.clip(fz, -self.fz_hard_limit, self.fz_hard_limit))
+        if self._contact:
+            fz_col = segment[:, 8].copy()
+            if self.fz_hard_limit > 0.0:
+                fz_col = np.clip(fz_col, -self.fz_hard_limit, self.fz_hard_limit)
+        else:
+            fz_col = np.zeros(segment.shape[0], dtype=np.float64)
+        segment[:, 8] = fz_col
 
         if self._ptp9d_client is None or not self._ptp9d_client.service_is_ready():
             self.get_logger().error(
@@ -5400,28 +5470,33 @@ class NodeCmdMotionInfer(Node):
             )
             return
 
+        flat_pose: list = []
+        for row in segment:
+            flat_pose.extend([
+                float(row[0]), float(row[1]), float(row[2]),
+                float(np.degrees(row[3])),
+                float(np.degrees(row[4])),
+                float(np.degrees(row[5])),
+                float(row[6]), float(row[7]), float(row[8]),
+            ])
+
         req = SingleArmCommand.Request()
         req.command_mode = "PTP9D"
-        req.target_pose = [
-            float(target[0]), float(target[1]), float(target[2]),
-            float(np.degrees(target[3])),
-            float(np.degrees(target[4])),
-            float(np.degrees(target[5])),
-            float(target[6]), float(target[7]), fz,
-        ]
+        req.target_pose = flat_pose
         req.target_velocity = float(self.ptp9d_target_velocity_mm_s)
 
         self._ptp9d_inflight = True
+        target = segment[-1]
         self.get_logger().info(
-            f"[PTP9D] -> idx={target_idx}/{seq.shape[0]-1} "
-            f"xyz=[{target[0]:.2f},{target[1]:.2f},{target[2]:.2f}]mm fz={fz:.2f}N"
+            f"[PTP9D] -> idx=[{segment_idx[0]}..{segment_idx[-1]}]/{seq.shape[0]-1} "
+            f"pts={len(segment_idx)} "
+            f"end_xyz=[{target[0]:.2f},{target[1]:.2f},{target[2]:.2f}]mm fz={target[8]:.2f}N"
         )
-        # cmd9 logged here is the requested target, not what _publish_cmd
-        # would have sent (this path never calls it) -- still gives the
-        # same meas-vs-cmd trail in the CSV, just one row per PTP9D call
-        # instead of one per 8ms control tick.
+        # cmd9 logged here is the segment's final requested waypoint, not
+        # what _publish_cmd would have sent (this path never calls it) --
+        # still gives the same meas-vs-cmd trail in the CSV, just one row
+        # per PTP9D call instead of one per 8ms control tick.
         target9 = target.copy()
-        target9[8] = fz
         self._log_metrics_row(target9.astype(np.float32), False)
         self._ptp9d_last_target9 = target9
 
