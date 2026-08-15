@@ -5719,6 +5719,13 @@ class NodeCmdMotionInfer(Node):
         req.target_pose = flat_pose
         req.target_velocity = float(self.ptp9d_target_velocity_mm_s)
 
+        # meas6/force here are the live pose/force at append time, not a
+        # continuous trace of what the C++ stream thread actually executes
+        # tick-by-tick (Python has no visibility into that) -- still useful
+        # as a coarse "what was requested vs where the robot actually was"
+        # series for offline oscillation diagnosis.
+        self._log_metrics_row(segment[-1].astype(np.float32), False)
+
         self._ptp9d_stream_topup_inflight = True
         self._ptp9d_stream_tail9 = segment[-1].copy()
         # Estimate how much wall-clock motion this batch represents at the
