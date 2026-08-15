@@ -4694,7 +4694,12 @@ class NodeCmdMotionInfer(Node):
         )
         self._infer_plan_count += 1
 
-        if self._ptp9d_track_active and self.stage == Stage.TRACK and not self._ptp9d_inflight:
+        if (
+            self._ptp9d_track_active
+            and not self.ptp9d_use_stream
+            and self.stage == Stage.TRACK
+            and not self._ptp9d_inflight
+        ):
             self._ptp9d_advance()
 
         # Optional Grad-CAM debug visualization. This performs a separate backward pass
@@ -5425,6 +5430,13 @@ class NodeCmdMotionInfer(Node):
         and the previous call's own done-callback (chain to the next segment).
         """
         if not (self._ptp9d_track_active and self.stage == Stage.TRACK):
+            return
+        if self.ptp9d_use_stream:
+            # Defense in depth: the streaming queue (_ptp9d_stream_topup)
+            # owns TRACK in this mode. Both this and the stream client would
+            # otherwise publish PTP9D-family commands concurrently -- they
+            # did, in an earlier version of this gating, and it made the
+            # robot visibly oscillate (20260815 first service_stream test).
             return
         if self._ptp9d_inflight:
             return
