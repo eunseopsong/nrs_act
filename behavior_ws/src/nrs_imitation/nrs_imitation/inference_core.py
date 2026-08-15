@@ -1311,6 +1311,17 @@ class NodeCmdMotionInfer(Node):
         # skips samples so fewer, less noisy points need to be visited.
         self.declare_parameter("ptp9d_stream_smooth_window", 5)
         self.declare_parameter("ptp9d_stream_stride", 2)
+        # Force is sent through a separate immediate channel
+        # (PTP9D_STREAM_SET_FORCE), not bundled into queued waypoints --
+        # otherwise a contact-state change sits behind however much
+        # position lookahead is already queued (up to ~1s) before it takes
+        # effect, which made the robot repeatedly let go right after
+        # touching (20260815 live test: 9 separate contact on/off cycles
+        # instead of one sustained hold like every training demonstration).
+        # min_interval_sec rate-limits routine updates while in steady
+        # contact; a contact on/off transition always sends immediately,
+        # bypassing this interval.
+        self.declare_parameter("ptp9d_stream_force_min_interval_sec", 0.1)
         self.declare_parameter("ptp9d_target_velocity_mm_s", 10.0)
         self.declare_parameter("ptp9d_service_name", "/singleArm_cmd/single_arm_command")
 
@@ -1813,6 +1824,9 @@ class NodeCmdMotionInfer(Node):
         self.ptp9d_stream_stride = max(
             1, int(self.get_parameter("ptp9d_stream_stride").value)
         )
+        self.ptp9d_stream_force_min_interval_sec = max(
+            0.0, float(self.get_parameter("ptp9d_stream_force_min_interval_sec").value)
+        )
         self.ptp9d_target_velocity_mm_s = max(
             0.0, float(self.get_parameter("ptp9d_target_velocity_mm_s").value)
         )
@@ -2277,6 +2291,10 @@ class NodeCmdMotionInfer(Node):
         self._ptp9d_stream_tail9: Optional[np.ndarray] = None
         self._ptp9d_stream_committed_until_t = 0.0
         self._ptp9d_stream_topup_inflight = False
+        self._ptp9d_stream_force_inflight = False
+        self._ptp9d_stream_last_force_send_t = 0.0
+        self._ptp9d_stream_last_sent_fz: Optional[float] = None
+        self._ptp9d_stream_last_sent_contact: Optional[bool] = None
 
         self.stage = Stage.APPROACH
 
@@ -5623,6 +5641,9 @@ class NodeCmdMotionInfer(Node):
         self._ptp9d_stream_started = True
         self._ptp9d_stream_tail9 = None
         self._ptp9d_stream_committed_until_t = _monotonic()
+        self._ptp9d_stream_last_sent_fz = None
+        self._ptp9d_stream_last_sent_contact = None
+        self._ptp9d_stream_last_force_send_t = 0.0
         future = self._ptp9d_client.call_async(req)
         future.add_done_callback(_on_start_done)
 
@@ -5690,16 +5711,16 @@ class NodeCmdMotionInfer(Node):
             return
 
         segment = seq[segment_idx]
-        # Same premature force-mode hijack as _ptp9d_advance/topic-publish:
-        # keep fz at 0 pre-contact so the streamed points stay pure position
-        # moves (Fd=0 -> full stiffness) until real contact is confirmed.
-        if self._contact:
-            fz_col = segment[:, 8].copy()
-            if self.fz_hard_limit > 0.0:
-                fz_col = np.clip(fz_col, -self.fz_hard_limit, self.fz_hard_limit)
-        else:
-            fz_col = np.zeros(segment.shape[0], dtype=np.float64)
-        segment[:, 8] = fz_col
+        # Force is NOT sent through the queue -- see _ptp9d_stream_update_force.
+        # It used to be bundled per-point here, but that meant a contact-state
+        # change could sit behind up to ~1s of already-queued pre-contact
+        # fz=0 points before taking effect, repeatedly making the robot let
+        # go right after touching (20260815 live test: contact toggled on/
+        # off 9 times instead of one sustained multi-second hold like every
+        # training demonstration). These force columns are unused by the
+        # robot-side stream thread now; zeroed only to keep the wire payload
+        # unambiguous.
+        segment[:, 6:9] = 0.0
 
         if self._ptp9d_client is None or not self._ptp9d_client.service_is_ready():
             return
@@ -5750,6 +5771,77 @@ class NodeCmdMotionInfer(Node):
 
         future = self._ptp9d_client.call_async(req)
         future.add_done_callback(_on_append_done)
+
+    def _ptp9d_stream_update_force(self):
+        """
+        Push the current fz decision straight to the stream thread via
+        PTP9D_STREAM_SET_FORCE, independent of _ptp9d_stream_topup's queue --
+        see the ptp9d_stream_force_min_interval_sec declare_parameter comment
+        for why force can't ride along with the queued waypoints.
+        """
+        if not self._ptp9d_stream_started:
+            return
+        if self._ptp9d_stream_force_inflight:
+            return
+        if not self.plans:
+            return
+
+        seq = self.plans[-1].seq_den
+        if seq.shape[0] == 0:
+            return
+
+        with self._lock:
+            pose6 = None if self._pose6 is None else self._pose6.copy()
+        if pose6 is None:
+            return
+
+        dists = np.linalg.norm(
+            seq[:, :3].astype(np.float64) - pose6[:3].astype(np.float64)[None, :], axis=1
+        )
+        idx = int(np.argmin(dists))
+
+        if self._contact:
+            fz = float(seq[idx, 8])
+            if self.fz_hard_limit > 0.0:
+                fz = float(np.clip(fz, -self.fz_hard_limit, self.fz_hard_limit))
+        else:
+            fz = 0.0
+
+        contact_changed = self._contact != self._ptp9d_stream_last_sent_contact
+        now_t = _monotonic()
+        due = (now_t - self._ptp9d_stream_last_force_send_t) >= self.ptp9d_stream_force_min_interval_sec
+        fz_changed = (
+            self._ptp9d_stream_last_sent_fz is None
+            or abs(fz - self._ptp9d_stream_last_sent_fz) >= 0.3
+        )
+        if not contact_changed and not (due and fz_changed):
+            return
+
+        if self._ptp9d_client is None or not self._ptp9d_client.service_is_ready():
+            return
+
+        req = SingleArmCommand.Request()
+        req.command_mode = "PTP9D_STREAM_SET_FORCE"
+        req.target_pose = [0.0, 0.0, fz]
+        req.target_velocity = 0.0
+
+        self._ptp9d_stream_force_inflight = True
+        self._ptp9d_stream_last_sent_fz = fz
+        self._ptp9d_stream_last_sent_contact = self._contact
+        self._ptp9d_stream_last_force_send_t = now_t
+
+        def _on_set_force_done(future):
+            self._ptp9d_stream_force_inflight = False
+            try:
+                resp = future.result()
+            except Exception as exc:
+                self.get_logger().error(f"[PTP9D-STREAM] set_force call raised: {exc}")
+                return
+            if not resp.success:
+                self.get_logger().warn(f"[PTP9D-STREAM] set_force failed: {resp.message}")
+
+        future = self._ptp9d_client.call_async(req)
+        future.add_done_callback(_on_set_force_done)
 
     def _run_demo_start_alignment(self, pose6: np.ndarray, now_t: float):
         """
@@ -5999,6 +6091,7 @@ class NodeCmdMotionInfer(Node):
             if self.ptp9d_use_stream:
                 self._update_contact(meas_fz)
                 self._ptp9d_stream_topup()
+                self._ptp9d_stream_update_force()
             return
 
         # Debounce PRELOAD entry from TRACK: a single noisy tick crossing

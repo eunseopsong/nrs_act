@@ -70,6 +70,7 @@ def generate_launch_description():
     ptp9d_stream_min_lookahead_sec = LaunchConfiguration("ptp9d_stream_min_lookahead_sec")
     ptp9d_stream_smooth_window = LaunchConfiguration("ptp9d_stream_smooth_window")
     ptp9d_stream_stride = LaunchConfiguration("ptp9d_stream_stride")
+    ptp9d_stream_force_min_interval_sec = LaunchConfiguration("ptp9d_stream_force_min_interval_sec")
     ptp9d_target_velocity_mm_s = LaunchConfiguration("ptp9d_target_velocity_mm_s")
     auto_move_to_demo_start = LaunchConfiguration("auto_move_to_demo_start")
     demo_start_move_sec = LaunchConfiguration("demo_start_move_sec")
@@ -214,6 +215,11 @@ def generate_launch_description():
         # noisy points need to be visited.
         DeclareLaunchArgument("ptp9d_stream_smooth_window", default_value="5"),
         DeclareLaunchArgument("ptp9d_stream_stride", default_value="2"),
+        # Force is pushed via a separate immediate channel
+        # (PTP9D_STREAM_SET_FORCE) instead of riding along with queued
+        # waypoints -- a contact on/off transition always sends right away;
+        # this only rate-limits routine updates during steady contact.
+        DeclareLaunchArgument("ptp9d_stream_force_min_interval_sec", default_value="0.1"),
         DeclareLaunchArgument("ptp9d_target_velocity_mm_s", default_value="10.0"),
         DeclareLaunchArgument("auto_move_to_demo_start", default_value="true"),
         DeclareLaunchArgument("demo_start_move_sec", default_value="5.0"),
@@ -398,6 +404,9 @@ def generate_launch_description():
                 ),
                 "ptp9d_stream_stride": ParameterValue(
                     ptp9d_stream_stride, value_type=int
+                ),
+                "ptp9d_stream_force_min_interval_sec": ParameterValue(
+                    ptp9d_stream_force_min_interval_sec, value_type=float
                 ),
                 "ptp9d_target_velocity_mm_s": ParameterValue(
                     ptp9d_target_velocity_mm_s, value_type=float

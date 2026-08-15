@@ -107,6 +107,11 @@ def generate_launch_description():
             # thread chases raw per-sample prediction noise point by point.
             DeclareLaunchArgument("ptp9d_stream_smooth_window", default_value="5"),
             DeclareLaunchArgument("ptp9d_stream_stride", default_value="2"),
+            # Force is pushed via a separate immediate channel instead of
+            # riding along with queued waypoints -- a contact on/off
+            # transition always sends right away; this only rate-limits
+            # routine updates during steady contact.
+            DeclareLaunchArgument("ptp9d_stream_force_min_interval_sec", default_value="0.1"),
             DeclareLaunchArgument("ptp9d_target_velocity_mm_s", default_value="10.0"),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(base_launch),
@@ -142,6 +147,7 @@ def generate_launch_description():
                     "ptp9d_stream_min_lookahead_sec": LaunchConfiguration("ptp9d_stream_min_lookahead_sec"),
                     "ptp9d_stream_smooth_window": LaunchConfiguration("ptp9d_stream_smooth_window"),
                     "ptp9d_stream_stride": LaunchConfiguration("ptp9d_stream_stride"),
+                    "ptp9d_stream_force_min_interval_sec": LaunchConfiguration("ptp9d_stream_force_min_interval_sec"),
                     "ptp9d_target_velocity_mm_s": ptp9d_target_velocity_mm_s,
                     "auto_stain_mask": "true",
                     "stain_mask_mode": "tcp_roi",
