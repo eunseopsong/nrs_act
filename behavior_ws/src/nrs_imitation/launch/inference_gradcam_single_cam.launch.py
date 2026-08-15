@@ -206,14 +206,14 @@ def generate_launch_description():
         # call-and-wait segments above -- never stops between calls, only
         # when the queue actually runs dry.
         DeclareLaunchArgument("ptp9d_use_stream", default_value="false"),
-        DeclareLaunchArgument("ptp9d_stream_topup_points", default_value="20"),
-        DeclareLaunchArgument("ptp9d_stream_min_lookahead_sec", default_value="1.0"),
+        DeclareLaunchArgument("ptp9d_stream_topup_points", default_value="40"),
+        DeclareLaunchArgument("ptp9d_stream_min_lookahead_sec", default_value="2.5"),
         # Smooths position/orientation (not force) before each streamed
         # segment is chosen -- without this the stream thread chases raw
         # per-sample prediction noise point by point (visibly oscillated in
         # the first live test). stride skips raw samples so fewer, less
         # noisy points need to be visited.
-        DeclareLaunchArgument("ptp9d_stream_smooth_window", default_value="5"),
+        DeclareLaunchArgument("ptp9d_stream_smooth_window", default_value="35"),
         DeclareLaunchArgument("ptp9d_stream_stride", default_value="2"),
         # Force is pushed via a separate immediate channel
         # (PTP9D_STREAM_SET_FORCE) instead of riding along with queued

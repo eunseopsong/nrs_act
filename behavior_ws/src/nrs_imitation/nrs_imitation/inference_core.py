@@ -1299,8 +1299,18 @@ class NodeCmdMotionInfer(Node):
         # continuity; the batched segments above still stop briefly at
         # every service call boundary.
         self.declare_parameter("ptp9d_use_stream", False)
-        self.declare_parameter("ptp9d_stream_topup_points", 20)
-        self.declare_parameter("ptp9d_stream_min_lookahead_sec", 1.0)
+        # Position lookahead can now be generous -- force no longer rides
+        # along in the queue (see PTP9D_STREAM_SET_FORCE below), so a deep
+        # buffer no longer risks delaying a contact-state change. Deepened
+        # from 20pts/1.0s to roughly match the batch/service_call path's
+        # implicit smoothing scale: each batched call there blends ~15-20mm
+        # of predicted path into one confident MotionBlender9D curve, which
+        # is what let it push through the ambiguous pre-contact "is this
+        # really contact yet" prediction wobble instead of hesitating
+        # through it point by point (20260815: service_stream kept letting
+        # go right after light touches even after force was decoupled).
+        self.declare_parameter("ptp9d_stream_topup_points", 40)
+        self.declare_parameter("ptp9d_stream_min_lookahead_sec", 2.5)
         # The robot-side stream thread rate-limits toward and pops every
         # single point it's given -- unlike the batch path, there is no
         # MotionBlender9D accel-decel profile to smooth over per-sample
@@ -1309,7 +1319,10 @@ class NodeCmdMotionInfer(Node):
         # smooth_window applies a centered moving average to position/
         # orientation (not force) before each segment is chosen; stride
         # skips samples so fewer, less noisy points need to be visited.
-        self.declare_parameter("ptp9d_stream_smooth_window", 5)
+        # Widened alongside topup_points/min_lookahead_sec above, same
+        # reasoning: match the batch path's much coarser effective
+        # smoothing scale through the pre-contact transition.
+        self.declare_parameter("ptp9d_stream_smooth_window", 35)
         self.declare_parameter("ptp9d_stream_stride", 2)
         # Force is sent through a separate immediate channel
         # (PTP9D_STREAM_SET_FORCE), not bundled into queued waypoints --
@@ -5824,6 +5837,15 @@ class NodeCmdMotionInfer(Node):
         req.command_mode = "PTP9D_STREAM_SET_FORCE"
         req.target_pose = [0.0, 0.0, fz]
         req.target_velocity = 0.0
+
+        # _ptp9d_stream_topup zeroes the force columns it logs (force no
+        # longer rides in the queue), so this is the only place that logs
+        # the fz actually being commanded -- without this, metrics CSVs
+        # would show cmd_fz_N as always 0 in service_stream runs.
+        cmd9 = np.zeros(9, dtype=np.float32)
+        cmd9[:6] = pose6[:6].astype(np.float32)
+        cmd9[8] = fz
+        self._log_metrics_row(cmd9, False)
 
         self._ptp9d_stream_force_inflight = True
         self._ptp9d_stream_last_sent_fz = fz

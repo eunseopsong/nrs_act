@@ -100,12 +100,12 @@ def generate_launch_description():
             DeclareLaunchArgument("ptp9d_segment_points", default_value="15"),
             DeclareLaunchArgument("ptp9d_segment_stride", default_value="1"),
             # Only used when inference_mode=service_stream.
-            DeclareLaunchArgument("ptp9d_stream_topup_points", default_value="20"),
-            DeclareLaunchArgument("ptp9d_stream_min_lookahead_sec", default_value="1.0"),
+            DeclareLaunchArgument("ptp9d_stream_topup_points", default_value="40"),
+            DeclareLaunchArgument("ptp9d_stream_min_lookahead_sec", default_value="2.5"),
             # Smooths position/orientation before each streamed segment is
             # chosen and skips raw samples -- without this the stream
             # thread chases raw per-sample prediction noise point by point.
-            DeclareLaunchArgument("ptp9d_stream_smooth_window", default_value="5"),
+            DeclareLaunchArgument("ptp9d_stream_smooth_window", default_value="35"),
             DeclareLaunchArgument("ptp9d_stream_stride", default_value="2"),
             # Force is pushed via a separate immediate channel instead of
             # riding along with queued waypoints -- a contact on/off
