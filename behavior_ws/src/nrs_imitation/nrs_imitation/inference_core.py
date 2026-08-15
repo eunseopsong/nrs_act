@@ -1291,6 +1291,16 @@ class NodeCmdMotionInfer(Node):
         # fully between every point.
         self.declare_parameter("ptp9d_segment_points", 15)
         self.declare_parameter("ptp9d_segment_stride", 1)
+        # True: use the Y2RobMotion PTP9D_STREAM_{START,APPEND,STOP} queue
+        # instead of the batched-segment PTP9D_STREAM_call-and-wait chain
+        # above. The queue is a persistent robot-side thread that never
+        # decelerates to a stop between waypoints (only when it actually
+        # runs dry), so this is the only path with true call-to-call
+        # continuity; the batched segments above still stop briefly at
+        # every service call boundary.
+        self.declare_parameter("ptp9d_use_stream", False)
+        self.declare_parameter("ptp9d_stream_topup_points", 20)
+        self.declare_parameter("ptp9d_stream_min_lookahead_sec", 1.0)
         self.declare_parameter("ptp9d_target_velocity_mm_s", 10.0)
         self.declare_parameter("ptp9d_service_name", "/singleArm_cmd/single_arm_command")
 
@@ -1780,6 +1790,13 @@ class NodeCmdMotionInfer(Node):
         self.ptp9d_segment_stride = max(
             1, int(self.get_parameter("ptp9d_segment_stride").value)
         )
+        self.ptp9d_use_stream = bool(self.get_parameter("ptp9d_use_stream").value)
+        self.ptp9d_stream_topup_points = max(
+            1, int(self.get_parameter("ptp9d_stream_topup_points").value)
+        )
+        self.ptp9d_stream_min_lookahead_sec = max(
+            0.05, float(self.get_parameter("ptp9d_stream_min_lookahead_sec").value)
+        )
         self.ptp9d_target_velocity_mm_s = max(
             0.0, float(self.get_parameter("ptp9d_target_velocity_mm_s").value)
         )
@@ -2240,6 +2257,10 @@ class NodeCmdMotionInfer(Node):
         self._ptp9d_track_active = False
         self._ptp9d_inflight = False
         self._ptp9d_last_target9: Optional[np.ndarray] = None
+        self._ptp9d_stream_started = False
+        self._ptp9d_stream_tail9: Optional[np.ndarray] = None
+        self._ptp9d_stream_committed_until_t = 0.0
+        self._ptp9d_stream_topup_inflight = False
 
         self.stage = Stage.APPROACH
 
@@ -5241,6 +5262,9 @@ class NodeCmdMotionInfer(Node):
 
         self._ptp9d_track_active = self.track_use_ptp9d_service
         self._ptp9d_inflight = False
+        if self._ptp9d_track_active and self.ptp9d_use_stream:
+            self._ptp9d_stream_stop()  # defensive: clears any stale queue/thread
+            self._ptp9d_stream_start()
 
     def _start_ptp_alignment(self, pose6_now: np.ndarray):
         """
@@ -5521,6 +5545,153 @@ class NodeCmdMotionInfer(Node):
 
         self._ptp9d_advance()
 
+    # ------------------------------------------------------------
+    # PTP9D streaming (queued, non-stop-start) -- see PTP9D_command_gen
+    # design note in Y2RobMotion robot_command.hpp for the C++ side.
+    # Unlike _ptp9d_advance's call-wait-call chain, topup is fire-and-keep-
+    # topping-up: it estimates how much queued motion is still buffered on
+    # the robot side (_ptp9d_stream_committed_until_t, purely from elapsed
+    # wall time -- there is no queue-depth feedback from the service) and
+    # only appends more once that buffer runs low, instead of after every
+    # single call finishes.
+    # ------------------------------------------------------------
+
+    def _ptp9d_stream_start(self):
+        if self._ptp9d_client is None:
+            self.get_logger().error(
+                f"[PTP9D-STREAM] service '{self.ptp9d_service_name}' client not built."
+            )
+            return
+        req = SingleArmCommand.Request()
+        req.command_mode = "PTP9D_STREAM_START"
+        req.target_pose = []
+        req.target_velocity = float(self.ptp9d_target_velocity_mm_s)
+
+        def _on_start_done(future):
+            try:
+                resp = future.result()
+            except Exception as exc:
+                self.get_logger().error(f"[PTP9D-STREAM] start call raised: {exc}")
+                return
+            if not resp.success:
+                self.get_logger().error(f"[PTP9D-STREAM] start failed: {resp.message}")
+                return
+            self.get_logger().info(f"[PTP9D-STREAM] {resp.message}")
+
+        self._ptp9d_stream_started = True
+        self._ptp9d_stream_tail9 = None
+        self._ptp9d_stream_committed_until_t = _monotonic()
+        future = self._ptp9d_client.call_async(req)
+        future.add_done_callback(_on_start_done)
+
+    def _ptp9d_stream_stop(self):
+        if self._ptp9d_client is None or not self._ptp9d_client.service_is_ready():
+            self._ptp9d_stream_started = False
+            return
+        req = SingleArmCommand.Request()
+        req.command_mode = "PTP9D_STREAM_STOP"
+        req.target_pose = []
+        req.target_velocity = 0.0
+
+        def _on_stop_done(future):
+            try:
+                future.result()
+            except Exception as exc:
+                self.get_logger().error(f"[PTP9D-STREAM] stop call raised: {exc}")
+
+        self._ptp9d_stream_started = False
+        future = self._ptp9d_client.call_async(req)
+        future.add_done_callback(_on_stop_done)
+
+    def _ptp9d_stream_topup(self):
+        if not self._ptp9d_stream_started:
+            return
+        if self._ptp9d_stream_topup_inflight:
+            return
+        now_t = _monotonic()
+        if (self._ptp9d_stream_committed_until_t - now_t) >= self.ptp9d_stream_min_lookahead_sec:
+            return  # still comfortably buffered, nothing to do this tick
+        if not self.plans:
+            return
+
+        seq = self.plans[-1].seq_den
+        if seq.shape[0] == 0:
+            return
+
+        if self._ptp9d_stream_tail9 is None:
+            with self._lock:
+                pose6 = None if self._pose6 is None else self._pose6.copy()
+            if pose6 is None:
+                return
+            anchor_xyz = pose6[:3].astype(np.float64)
+        else:
+            anchor_xyz = self._ptp9d_stream_tail9[:3].astype(np.float64)
+
+        dists = np.linalg.norm(seq[:, :3].astype(np.float64) - anchor_xyz[None, :], axis=1)
+        anchor_idx = int(np.argmin(dists))
+        lo = min(anchor_idx + 1, seq.shape[0] - 1)
+        hi = min(lo + self.ptp9d_stream_topup_points, seq.shape[0])
+        segment_idx = list(range(lo, hi))
+        if not segment_idx:
+            # Already at the end of this plan's horizon -- nothing new to
+            # append until the next inference plan arrives.
+            return
+
+        segment = seq[segment_idx].astype(np.float64)
+        # Same premature force-mode hijack as _ptp9d_advance/topic-publish:
+        # keep fz at 0 pre-contact so the streamed points stay pure position
+        # moves (Fd=0 -> full stiffness) until real contact is confirmed.
+        if self._contact:
+            fz_col = segment[:, 8].copy()
+            if self.fz_hard_limit > 0.0:
+                fz_col = np.clip(fz_col, -self.fz_hard_limit, self.fz_hard_limit)
+        else:
+            fz_col = np.zeros(segment.shape[0], dtype=np.float64)
+        segment[:, 8] = fz_col
+
+        if self._ptp9d_client is None or not self._ptp9d_client.service_is_ready():
+            return
+
+        flat_pose: list = []
+        for row in segment:
+            flat_pose.extend([
+                float(row[0]), float(row[1]), float(row[2]),
+                float(np.degrees(row[3])),
+                float(np.degrees(row[4])),
+                float(np.degrees(row[5])),
+                float(row[6]), float(row[7]), float(row[8]),
+            ])
+
+        req = SingleArmCommand.Request()
+        req.command_mode = "PTP9D_STREAM_APPEND"
+        req.target_pose = flat_pose
+        req.target_velocity = float(self.ptp9d_target_velocity_mm_s)
+
+        self._ptp9d_stream_topup_inflight = True
+        self._ptp9d_stream_tail9 = segment[-1].copy()
+        # Estimate how much wall-clock motion this batch represents at the
+        # trajectory's native sample rate -- a rough proxy (real robot-side
+        # consumption depends on ptp9d_target_velocity_mm_s and per-point
+        # spacing, not this rate), deliberately conservative: an
+        # underestimate just triggers extra, harmless top-up calls, while
+        # relying on the buffer running dry would delay contact response.
+        self._ptp9d_stream_committed_until_t = max(
+            self._ptp9d_stream_committed_until_t, now_t
+        ) + len(segment_idx) / max(1e-6, self.trajectory_hz)
+
+        def _on_append_done(future):
+            self._ptp9d_stream_topup_inflight = False
+            try:
+                resp = future.result()
+            except Exception as exc:
+                self.get_logger().error(f"[PTP9D-STREAM] append call raised: {exc}")
+                return
+            if not resp.success:
+                self.get_logger().warn(f"[PTP9D-STREAM] append failed: {resp.message}")
+
+        future = self._ptp9d_client.call_async(req)
+        future.add_done_callback(_on_append_done)
+
     def _run_demo_start_alignment(self, pose6: np.ndarray, now_t: float):
         """
         Move current robot pose to demo_start_pose_mean before policy inference.
@@ -5762,9 +5933,13 @@ class NodeCmdMotionInfer(Node):
 
         if self._ptp9d_track_active and self.stage == Stage.TRACK:
             # PTP9D drives TRACK entirely via its own async service-call
-            # chain (see _ptp9d_advance/_on_ptp9d_step_done) -- publishing
-            # anything from here would race PTP9D_command_gen's own stream
-            # to cmdMotion on the same topic.
+            # chain (see _ptp9d_advance/_on_ptp9d_step_done), or via the
+            # streaming queue (_ptp9d_stream_topup) -- publishing anything
+            # from here would race PTP9D_command_gen's own stream to
+            # cmdMotion on the same topic.
+            if self.ptp9d_use_stream:
+                self._update_contact(meas_fz)
+                self._ptp9d_stream_topup()
             return
 
         # Debounce PRELOAD entry from TRACK: a single noisy tick crossing

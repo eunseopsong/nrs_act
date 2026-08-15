@@ -65,6 +65,9 @@ def generate_launch_description():
     track_use_ptp9d_service = LaunchConfiguration("track_use_ptp9d_service")
     ptp9d_segment_points = LaunchConfiguration("ptp9d_segment_points")
     ptp9d_segment_stride = LaunchConfiguration("ptp9d_segment_stride")
+    ptp9d_use_stream = LaunchConfiguration("ptp9d_use_stream")
+    ptp9d_stream_topup_points = LaunchConfiguration("ptp9d_stream_topup_points")
+    ptp9d_stream_min_lookahead_sec = LaunchConfiguration("ptp9d_stream_min_lookahead_sec")
     ptp9d_target_velocity_mm_s = LaunchConfiguration("ptp9d_target_velocity_mm_s")
     auto_move_to_demo_start = LaunchConfiguration("auto_move_to_demo_start")
     demo_start_move_sec = LaunchConfiguration("demo_start_move_sec")
@@ -195,6 +198,13 @@ def generate_launch_description():
         # cost of coarser per-call contact/safety re-evaluation.
         DeclareLaunchArgument("ptp9d_segment_points", default_value="15"),
         DeclareLaunchArgument("ptp9d_segment_stride", default_value="1"),
+        # True: use the persistent PTP9D_STREAM queue (see
+        # _ptp9d_stream_topup in inference_core.py) instead of the batched
+        # call-and-wait segments above -- never stops between calls, only
+        # when the queue actually runs dry.
+        DeclareLaunchArgument("ptp9d_use_stream", default_value="false"),
+        DeclareLaunchArgument("ptp9d_stream_topup_points", default_value="20"),
+        DeclareLaunchArgument("ptp9d_stream_min_lookahead_sec", default_value="1.0"),
         DeclareLaunchArgument("ptp9d_target_velocity_mm_s", default_value="10.0"),
         DeclareLaunchArgument("auto_move_to_demo_start", default_value="true"),
         DeclareLaunchArgument("demo_start_move_sec", default_value="5.0"),
@@ -364,6 +374,15 @@ def generate_launch_description():
                 ),
                 "ptp9d_segment_stride": ParameterValue(
                     ptp9d_segment_stride, value_type=int
+                ),
+                "ptp9d_use_stream": ParameterValue(
+                    ptp9d_use_stream, value_type=bool
+                ),
+                "ptp9d_stream_topup_points": ParameterValue(
+                    ptp9d_stream_topup_points, value_type=int
+                ),
+                "ptp9d_stream_min_lookahead_sec": ParameterValue(
+                    ptp9d_stream_min_lookahead_sec, value_type=float
                 ),
                 "ptp9d_target_velocity_mm_s": ParameterValue(
                     ptp9d_target_velocity_mm_s, value_type=float
