@@ -18,32 +18,6 @@ find_package(Eigen3 REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
 # =========================
-# Solver library (NO main inside)
-# =========================
-add_library(vr_calibration_solver
-  src/vr_calibration_solver.cpp
-)
-
-target_compile_features(vr_calibration_solver PUBLIC cxx_std_17)
-
-target_include_directories(vr_calibration_solver PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
-
-ament_target_dependencies(vr_calibration_solver
-  rclcpp
-  std_msgs
-  geometry_msgs
-  std_srvs
-)
-
-target_link_libraries(vr_calibration_solver
-  yaml-cpp
-  Eigen3::Eigen
-)
-
-# =========================
 # Executable (ONLY main here)
 # =========================
 add_executable(vr_calibration
@@ -66,7 +40,6 @@ ament_target_dependencies(vr_calibration
 )
 
 target_link_libraries(vr_calibration
-  vr_calibration_solver
   yaml-cpp
   Eigen3::Eigen
 )
@@ -74,7 +47,7 @@ target_link_libraries(vr_calibration
 # =========================
 # Install
 # =========================
-install(TARGETS vr_calibration vr_calibration_solver
+install(TARGETS vr_calibration
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}

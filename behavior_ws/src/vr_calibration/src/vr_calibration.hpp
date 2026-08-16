@@ -17,7 +17,6 @@
 #include <cstdint>
 
 #include "vr_calibration_common.hpp"
-#include "vr_calibration_solver.hpp"
 
 class VrCalibration : public rclcpp::Node
 {
