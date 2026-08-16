@@ -356,7 +356,6 @@ class ViveTracker(Node):
         else:
             self._set_T_CE(np.eye(4, dtype=np.float64))
             self.get_logger().warn("[T_CE] not found/invalid in yaml. Using identity.")
-        self.R_Adj = np.array(data.get("R_Adj", np.eye(3)), dtype=np.float64)
         T_FIX_loaded = self._to_T44(data.get("T_FIX", None))
         self.Z_RESIDUAL = self._load_z_residual(data.get("Z_RESIDUAL", None))
         self.XY_RESIDUAL = self._load_xy_residual(data.get("XY_RESIDUAL", None))
@@ -373,10 +372,6 @@ class ViveTracker(Node):
                 f"[tool_correction_mode] unknown '{self.tool_correction_mode}', using t_bc"
             )
             self.tool_correction_mode = "t_bc" if self.T_BC_valid else "t_ce"
-
-        # ROS1 순서 호환: T_Adj = R_Adj.T
-        self.T_Adj = np.eye(4, dtype=np.float64)
-        self.T_Adj[:3, :3] = self.R_Adj.T
 
         # T_SA: YAML 우선, 없으면 DEFAULT
         T_SA_loaded = self._to_T44(data.get("T_SA", None))
@@ -765,8 +760,7 @@ class ViveTracker(Node):
             raw_M = tdata["raw_pose_matrix"]
 
             # base chain (ROS1 순서 유지)
-            M_adj = self.T_Adj @ raw_M
-            M_cal = self._apply_tool_correction(M_adj)
+            M_cal = self._apply_tool_correction(raw_M)
 
             # out_fix + z-plane correction: left-multiplied in base/world frame.
             M_cal = self.T_FIX @ M_cal

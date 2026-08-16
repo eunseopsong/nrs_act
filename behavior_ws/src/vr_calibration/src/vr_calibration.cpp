@@ -1,4 +1,4 @@
-// vr_calibration.cpp  (Option B: Auto-capture + Update R_Adj, T_AD, T_BC, T_SA in one YAML write)
+// vr_calibration.cpp  (Option B: Auto-capture + Update T_AD, T_BC, T_SA in one YAML write)
 // v9: T_FIX uses the same solved T_BC tool-center chain as runtime
 
 #include <rclcpp/rclcpp.hpp>
@@ -288,8 +288,6 @@ public:
     this->declare_parameter<std::string>("ee_output_file", ee_path_);
     this->declare_parameter<std::string>("vr_output_file", vr_path_);
     this->declare_parameter<std::string>("calib_yaml_file", calib_yaml_path_);
-    this->declare_parameter<bool>("radj_enable", false);
-    this->declare_parameter<int>("radj_sample_count", 0); // <=0: use all captured samples
     this->declare_parameter<double>("capture_hold_time_s", hold_time_s_);
     this->declare_parameter<double>("capture_min_hold_time_s", min_hold_time_s_);
     this->declare_parameter<double>("capture_window_s", 0.5);
@@ -350,12 +348,6 @@ public:
     ee_path_             = this->get_parameter("ee_output_file").as_string();
     vr_path_             = this->get_parameter("vr_output_file").as_string();
     calib_yaml_path_     = this->get_parameter("calib_yaml_file").as_string();
-    radj_enable_         = this->get_parameter("radj_enable").as_bool();
-    const int64_t radj_sample_count_param = this->get_parameter("radj_sample_count").as_int();
-    radj_use_all_samples_ = (radj_sample_count_param <= 0);
-    radj_sample_count_ = radj_use_all_samples_
-      ? 0
-      : static_cast<size_t>(std::max<int64_t>(3, radj_sample_count_param));
     hold_time_s_         = std::max(0.1, this->get_parameter("capture_hold_time_s").as_double());
     min_hold_time_s_     = std::max(0.0, this->get_parameter("capture_min_hold_time_s").as_double());
     min_hold_time_s_     = std::min(min_hold_time_s_, hold_time_s_);
@@ -508,10 +500,6 @@ public:
     RCLCPP_INFO(get_logger(),
       "[SYNC] vr<%.2fs dt<%.3fs",
       vr_capture_age_s_, max_capture_sync_dt_s_);
-    const std::string radj_sample_count_log =
-      radj_use_all_samples_ ? "all" : std::to_string(radj_sample_count_);
-    RCLCPP_INFO(get_logger(), "[R_ADJ] en=%s n=%s",
-      radj_enable_ ? "true" : "false", radj_sample_count_log.c_str());
     RCLCPP_INFO(get_logger(), "[HAND_EYE] trim_prefix=%s span>=%.1fdeg min_prefix=%zu",
       handeye_auto_trim_low_rotation_prefix_ ? "true" : "false",
       handeye_prefix_rotation_span_deg_,
@@ -722,7 +710,7 @@ public:
 
     // ==========================================================
     // (final) compute T_BC / T_AD_avg and write YAML ONCE with:
-    //         R_Adj, T_AD, T_BC, T_SA, T_CE
+    //         T_AD, T_BC, T_SA, T_CE
     // ==========================================================
     try {
       finalizeCalibrationAndSaveYaml();
@@ -761,9 +749,6 @@ private:
   double t_sa_wait_timeout_s_{15.0};
   double t_sa_hold_s_{0.25};
   double t_sa_fresh_s_{1.0};
-  bool radj_enable_{false};
-  size_t radj_sample_count_{8};
-  bool radj_use_all_samples_{false};
   double max_calib_position_rms_mm_{50.0};
   bool handeye_auto_trim_low_rotation_prefix_{true};
   double handeye_prefix_rotation_span_deg_{5.0};
@@ -908,8 +893,6 @@ private:
   Eigen::Matrix4d T_SA_old_ = Eigen::Matrix4d::Identity();
 
   // computed outputs
-  bool have_radj_{false};
-  Eigen::Matrix3d R_adj_ = Eigen::Matrix3d::Identity();
   Eigen::Matrix4d T_FIX_ = Eigen::Matrix4d::Identity();
 
   struct ZResidualModel
@@ -1936,80 +1919,7 @@ private:
     return true;
   }
 
-  bool computeRAdjFromSamples()
-  {
-    const size_t N_all = T_AB_all_.size();
-    if (N_all < 3 || T_DC_all_.size() != N_all) {
-      RCLCPP_WARN(get_logger(), "[R_ADJ] need >=3; use I");
-      R_adj_ = Eigen::Matrix3d::Identity();
-      have_radj_ = false;
-      return false;
-    }
-
-    const size_t N = radj_use_all_samples_
-      ? N_all
-      : std::min(radj_sample_count_, N_all);
-    Eigen::Vector3d p_arm_mean = Eigen::Vector3d::Zero();
-    Eigen::Vector3d p_vr_mean = Eigen::Vector3d::Zero();
-
-    for (size_t i=0; i<N; ++i) {
-      p_arm_mean += T_AB_all_[i].block<3,1>(0,3);
-      p_vr_mean += T_DC_all_[i].block<3,1>(0,3);
-    }
-    p_arm_mean /= static_cast<double>(N);
-    p_vr_mean /= static_cast<double>(N);
-
-    Eigen::Matrix3d H = Eigen::Matrix3d::Zero();
-    for (size_t i=0; i<N; ++i) {
-      const Eigen::Vector3d a = T_AB_all_[i].block<3,1>(0,3) - p_arm_mean;
-      const Eigen::Vector3d v = T_DC_all_[i].block<3,1>(0,3) - p_vr_mean;
-      H += v * a.transpose();
-    }
-
-    Eigen::JacobiSVD<Eigen::Matrix3d> svd(H, Eigen::ComputeFullU | Eigen::ComputeFullV);
-    if (svd.info() != Eigen::Success) {
-      RCLCPP_WARN(get_logger(), "[R_ADJ] SVD failed; use I");
-      R_adj_ = Eigen::Matrix3d::Identity();
-      have_radj_ = false;
-      return false;
-    }
-
-    Eigen::Matrix3d R_vr_to_arm = svd.matrixV() * svd.matrixU().transpose();
-    if (R_vr_to_arm.determinant() < 0.0) {
-      Eigen::Matrix3d V = svd.matrixV();
-      V.col(2) *= -1.0;
-      R_vr_to_arm = V * svd.matrixU().transpose();
-    }
-
-    double rms = 0.0;
-    for (size_t i=0; i<N; ++i) {
-      const Eigen::Vector3d a = T_AB_all_[i].block<3,1>(0,3) - p_arm_mean;
-      const Eigen::Vector3d v = T_DC_all_[i].block<3,1>(0,3) - p_vr_mean;
-      const Eigen::Vector3d e = a - R_vr_to_arm * v;
-      rms += e.squaredNorm();
-    }
-    rms = std::sqrt(rms / static_cast<double>(N));
-
-    // Runtime applies T_Adj = R_Adj.transpose() before the base calibration.
-    R_adj_ = R_vr_to_arm.transpose();
-    have_radj_ = true;
-
-    RCLCPP_INFO(get_logger(),
-      "[R_ADJ_DONE] n=%zu/%zu rms=%.3fmm\n"
-      "R_Adj=\n"
-      "[% .6f % .6f % .6f]\n"
-      "[% .6f % .6f % .6f]\n"
-      "[% .6f % .6f % .6f]",
-      N, N_all, rms * 1000.0,
-      R_adj_(0,0), R_adj_(0,1), R_adj_(0,2),
-      R_adj_(1,0), R_adj_(1,1), R_adj_(1,2),
-      R_adj_(2,0), R_adj_(2,1), R_adj_(2,2));
-
-    return true;
-  }
-
   Eigen::Matrix4d computeZPlaneFix(const Eigen::Matrix4d& T_AD,
-                                   const Eigen::Matrix3d& R_Adj,
                                    const Eigen::Matrix4d& T_BC)
   {
     Eigen::Matrix4d T_fix = Eigen::Matrix4d::Identity();
@@ -2023,8 +1933,6 @@ private:
       return T_fix;
     }
 
-    Eigen::Matrix4d T_Adj = Eigen::Matrix4d::Identity();
-    T_Adj.block<3,3>(0,0) = R_Adj.transpose();
     const Eigen::Matrix4d T_CB = invT(T_BC);
 
     Eigen::MatrixXd A(static_cast<Eigen::Index>(N), 3);
@@ -2036,7 +1944,7 @@ private:
 
     double rms_before = 0.0;
     for (size_t i=0; i<N; ++i) {
-      const Eigen::Matrix4d M_cal = T_AD * T_Adj * T_DC_all_[i] * T_CB;
+      const Eigen::Matrix4d M_cal = T_AD * T_DC_all_[i] * T_CB;
       const Eigen::Vector3d p_cal = M_cal.block<3,1>(0,3);
       const double z_ref = T_AB_all_[i](2,3);
       const double dz = z_ref - p_cal.z();
@@ -2148,7 +2056,6 @@ private:
   }
 
   std::vector<double> computeCalibrationPositionResidualsMm(const Eigen::Matrix4d& T_AD,
-                                                            const Eigen::Matrix3d& R_Adj,
                                                             const Eigen::Matrix4d& T_BC,
                                                             const Eigen::Matrix4d& T_FIX,
                                                             bool apply_z_residual,
@@ -2159,14 +2066,12 @@ private:
       return {};
     }
 
-    Eigen::Matrix4d T_Adj = Eigen::Matrix4d::Identity();
-    T_Adj.block<3,3>(0,0) = R_Adj.transpose();
     const Eigen::Matrix4d T_CB = invT(T_BC);
 
     std::vector<double> residuals_mm;
     residuals_mm.reserve(N);
     for (size_t i=0; i<N; ++i) {
-      const Eigen::Matrix4d M_cal = T_FIX * T_AD * T_Adj * T_DC_all_[i] * T_CB;
+      const Eigen::Matrix4d M_cal = T_FIX * T_AD * T_DC_all_[i] * T_CB;
       Eigen::Vector3d p_cal = M_cal.block<3,1>(0,3);
       if (apply_z_residual) {
         p_cal.z() += evalZResidualCorrectionM(z_residual_model_, p_cal.x(), p_cal.y());
@@ -2181,7 +2086,6 @@ private:
   }
 
   bool rejectWorstHandeyeOutlier(const Eigen::Matrix4d& T_AD,
-                                 const Eigen::Matrix3d& R_Adj,
                                  const Eigen::Matrix4d& T_BC)
   {
     const size_t N = T_AB_all_.size();
@@ -2191,7 +2095,7 @@ private:
 
     const Eigen::Matrix4d T_FIX_identity = Eigen::Matrix4d::Identity();
     const std::vector<double> residuals_mm =
-      computeCalibrationPositionResidualsMm(T_AD, R_Adj, T_BC, T_FIX_identity, false);
+      computeCalibrationPositionResidualsMm(T_AD, T_BC, T_FIX_identity, false);
     if (residuals_mm.size() != N) return false;
 
     const auto worst_it = std::max_element(residuals_mm.begin(), residuals_mm.end());
@@ -2239,7 +2143,6 @@ private:
   }
 
   ZResidualModel computeZResidualModel(const Eigen::Matrix4d& T_AD,
-                                       const Eigen::Matrix3d& R_Adj,
                                        const Eigen::Matrix4d& T_BC,
                                        const Eigen::Matrix4d& T_FIX)
   {
@@ -2259,8 +2162,6 @@ private:
       return model;
     }
 
-    Eigen::Matrix4d T_Adj = Eigen::Matrix4d::Identity();
-    T_Adj.block<3,3>(0,0) = R_Adj.transpose();
     const Eigen::Matrix4d T_CB = invT(T_BC);
 
     std::vector<Eigen::Vector3d> p_list;
@@ -2270,7 +2171,7 @@ private:
 
     Eigen::Vector2d xy_mean = Eigen::Vector2d::Zero();
     for (size_t i=0; i<N; ++i) {
-      const Eigen::Matrix4d M_cal = T_FIX * T_AD * T_Adj * T_DC_all_[i] * T_CB;
+      const Eigen::Matrix4d M_cal = T_FIX * T_AD * T_DC_all_[i] * T_CB;
       const Eigen::Vector3d p_cal = M_cal.block<3,1>(0,3);
       const double z_ref = T_AB_all_[i](2,3);
       p_list.push_back(p_cal);
@@ -2361,7 +2262,6 @@ private:
   // residual scale error, etc.) previously passed straight through into
   // the recorded dataset positions uncorrected.
   XYResidualModel computeXYResidualModel(const Eigen::Matrix4d& T_AD,
-                                         const Eigen::Matrix3d& R_Adj,
                                          const Eigen::Matrix4d& T_BC,
                                          const Eigen::Matrix4d& T_FIX)
   {
@@ -2381,8 +2281,6 @@ private:
       return model;
     }
 
-    Eigen::Matrix4d T_Adj = Eigen::Matrix4d::Identity();
-    T_Adj.block<3,3>(0,0) = R_Adj.transpose();
     const Eigen::Matrix4d T_CB = invT(T_BC);
 
     std::vector<Eigen::Vector3d> p_list;
@@ -2393,7 +2291,7 @@ private:
 
     Eigen::Vector2d xy_mean = Eigen::Vector2d::Zero();
     for (size_t i=0; i<N; ++i) {
-      const Eigen::Matrix4d M_cal = T_FIX * T_AD * T_Adj * T_DC_all_[i] * T_CB;
+      const Eigen::Matrix4d M_cal = T_FIX * T_AD * T_DC_all_[i] * T_CB;
       const Eigen::Vector3d p_cal = M_cal.block<3,1>(0,3);
       const Eigen::Vector3d p_ref3 = T_AB_all_[i].block<3,1>(0,3);
       p_list.push_back(p_cal);
@@ -2491,7 +2389,6 @@ private:
   }
 
   double validateCalibrationFitMm(const Eigen::Matrix4d& T_AD,
-                                  const Eigen::Matrix3d& R_Adj,
                                   const Eigen::Matrix4d& T_BC,
                                   const Eigen::Matrix4d& T_FIX)
   {
@@ -2500,8 +2397,6 @@ private:
       throw std::runtime_error("No samples available for calibration validation.");
     }
 
-    Eigen::Matrix4d T_Adj = Eigen::Matrix4d::Identity();
-    T_Adj.block<3,3>(0,0) = R_Adj.transpose();
     const Eigen::Matrix4d T_CB = invT(T_BC);
 
     double sum2 = 0.0;
@@ -2511,7 +2406,7 @@ private:
     Eigen::Vector3d max_p_cal = Eigen::Vector3d::Zero();
 
     for (size_t i=0; i<N; ++i) {
-      const Eigen::Matrix4d M_cal = T_FIX * T_AD * T_Adj * T_DC_all_[i] * T_CB;
+      const Eigen::Matrix4d M_cal = T_FIX * T_AD * T_DC_all_[i] * T_CB;
       const Eigen::Vector3d p_cal =
         applyXYResidualToPoint(applyZResidualToPoint(M_cal.block<3,1>(0,3)));
       const Eigen::Vector3d p_ref = T_AB_all_[i].block<3,1>(0,3);
@@ -3045,24 +2940,11 @@ private:
       throw std::runtime_error("Not enough samples to compute calibration (need >=2).");
     }
 
-    if (radj_enable_) {
-      computeRAdjFromSamples();
-    } else {
-      R_adj_ = Eigen::Matrix3d::Identity();
-      have_radj_ = false;
-      RCLCPP_INFO(get_logger(),
-        "[R_ADJ] disabled; use I");
-    }
-
-    Eigen::Matrix4d T_Adj = Eigen::Matrix4d::Identity();
-    T_Adj.block<3,3>(0,0) =
-      (have_radj_ ? R_adj_ : Eigen::Matrix3d::Identity()).transpose();
-
-    std::vector<Eigen::Matrix4d> T_DC_adj_all;
-    T_DC_adj_all.reserve(N_all);
-    for (const auto& T_DC : T_DC_all_) {
-      T_DC_adj_all.push_back(T_Adj * T_DC);
-    }
+    // T_DC_adj_all used to carry an optional R_Adj point-cloud pre-rotation.
+    // R_Adj was proven to have zero effect on the hand-eye solve (it cancels
+    // exactly in the relative-motion AX=XB formulation, and T_AD absorbs the
+    // rest), so it was removed; this is now just T_DC_all_ unchanged.
+    const std::vector<Eigen::Matrix4d>& T_DC_adj_all = T_DC_all_;
 
     const size_t solve_start_idx = chooseHandeyeSolveStartIndex();
     const size_t N = N_all - solve_start_idx;
@@ -3210,7 +3092,6 @@ private:
 
     if (rejectWorstHandeyeOutlier(
           best.T_AD_avg,
-          have_radj_ ? R_adj_ : Eigen::Matrix3d::Identity(),
           best.T_BC)) {
       finalizeCalibrationAndSaveYamlImpl();
       return;
@@ -3220,22 +3101,18 @@ private:
     const Eigen::Matrix4d T_AD_avg = best.T_AD_avg;
     T_FIX_ = computeZPlaneFix(
       T_AD_avg,
-      have_radj_ ? R_adj_ : Eigen::Matrix3d::Identity(),
       T_BC);
     z_residual_model_ = computeZResidualModel(
       T_AD_avg,
-      have_radj_ ? R_adj_ : Eigen::Matrix3d::Identity(),
       T_BC,
       T_FIX_);
     xy_residual_model_ = computeXYResidualModel(
       T_AD_avg,
-      have_radj_ ? R_adj_ : Eigen::Matrix3d::Identity(),
       T_BC,
       T_FIX_);
 
     validateCalibrationFitMm(
       T_AD_avg,
-      have_radj_ ? R_adj_ : Eigen::Matrix3d::Identity(),
       T_BC,
       T_FIX_);
 
@@ -3253,15 +3130,11 @@ private:
     writeCalibrationYamlAll(
       T_AD_avg,
       T_BC,
-      have_radj_ ? R_adj_ : Eigen::Matrix3d::Identity(),
       T_FIX_,
       T_CE_,
       T_SA_to_save
     );
 
-    RCLCPP_INFO(get_logger(),
-      "[YAML_SAVED] R_Adj=%s",
-      have_radj_ ? "computed" : "IDENTITY");
     RCLCPP_INFO(get_logger(),
       "[YAML_SAVED] T_SA %s %s",
       t_sa_mode_.c_str(),
@@ -3281,7 +3154,6 @@ private:
 
   void writeCalibrationYamlAll(const Eigen::Matrix4d& T_AD,
                                const Eigen::Matrix4d& T_BC,
-                               const Eigen::Matrix3d& R_Adj,
                                const Eigen::Matrix4d& T_FIX,
                                const Eigen::Matrix4d& T_CE,
                                const Eigen::Matrix4d& T_SA)
@@ -3293,7 +3165,7 @@ private:
     const int prec = 12;
 
     ofs << "# VR calibration matrix setting\n";
-    ofs << "# Auto-capture + One-shot YAML update (R_Adj, T_AD, T_BC, T_SA)\n";
+    ofs << "# Auto-capture + One-shot YAML update (T_AD, T_BC, T_SA)\n";
     ofs << "# saved_at: " << nowLocalString() << "\n\n";
 
     ofs << "meta:\n";
@@ -3330,23 +3202,8 @@ private:
       ofs << "\n";
     };
 
-    auto writeMat3 = [&](const std::string& key, const Eigen::Matrix3d& R){
-      ofs << key << ":\n";
-      ofs << std::fixed << std::setprecision(prec);
-      for (int r=0;r<3;r++){
-        ofs << "  - [";
-        for (int c=0;c<3;c++){
-          ofs << R(r,c);
-          if (c<2) ofs << ", ";
-        }
-        ofs << "]\n";
-      }
-      ofs << "\n";
-    };
-
     writeMat4("T_AD", T_AD);
     writeMat4("T_BC", T_BC);
-    writeMat3("R_Adj", R_Adj);
 
     ofs << "# left-multiplied rigid z-plane correction (M_cal = T_FIX @ M_cal)\n";
     writeMat4("T_FIX", T_FIX);

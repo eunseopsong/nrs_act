@@ -106,7 +106,6 @@ pose별 force/torque residual을 계산하고, residual이 작은 good-quality p
 
 - `T_AD`: Vive world/raw frame을 robot base frame으로 올리는 base calibration
 - `T_BC`: robot EE에서 tracker/tool frame까지의 offset
-- `R_Adj`: VR point cloud와 robot point cloud의 미세 기울어짐/축 정렬 보정
 - `T_FIX`: z-plane residual을 줄이기 위한 left-multiplied rigid correction
 - `Z_RESIDUAL`: `T_FIX` 뒤에도 남는 xy 위치별 z 오차를 보정하는 quadratic_xy 모델
 - `XY_RESIDUAL`: `T_FIX`/`Z_RESIDUAL` 뒤에도 남는 xy 위치별 xy(평면) 오차를 보정하는 quadratic_xy 모델
@@ -134,8 +133,6 @@ ros2 run vr_calibration vr_calibration
 ```text
 t_sa_mode = update
 t_sa_max_delta_deg = 180.0
-radj_enable = false        # 기본은 raw VR world를 그대로 쓰고 T_AD가 base-station/world frame 차이를 흡수
-radj_sample_count = 0        # 0 또는 음수면 전체 captured sample 사용
 capture_hold_time_s = 1.5
 capture_min_hold_time_s = 0.8
 capture_window_s = 0.5
@@ -217,33 +214,24 @@ T_DC[i] = VR world(D) -> tracker(C)
 
 ```text
 1. clean sample set 수집
-2. R_Adj 적용 여부 결정
-   - 기본값 `radj_enable=false`: R_Adj=Identity
-   - legacy/debug `radj_enable=true`: captured position cloud로 R_Adj 계산
-3. T_DC_adj[i] = T_Adj * T_DC[i]
-   where T_Adj rotation = R_Adj.T
-4. hand-eye solve로 T_BC 계산
-5. 각 sample에서 T_AD_i = T_AB[i] * T_BC * inv(T_DC_adj[i]) 계산
-6. T_AD_i 평균으로 T_AD 생성
-7. T_FIX 계산
-8. Z_RESIDUAL 계산 (T_FIX 이후 z 잔차)
-9. XY_RESIDUAL 계산 (T_FIX/Z_RESIDUAL 이후 xy 잔차)
-10. runtime-chain residual 검증
-11. YAML 저장
+2. hand-eye solve로 T_BC 계산
+3. 각 sample에서 T_AD_i = T_AB[i] * T_BC * inv(T_DC[i]) 계산
+4. T_AD_i 평균으로 T_AD 생성
+5. T_FIX 계산
+6. Z_RESIDUAL 계산 (T_FIX 이후 z 잔차)
+7. XY_RESIDUAL 계산 (T_FIX/Z_RESIDUAL 이후 xy 잔차)
+8. runtime-chain residual 검증
+9. YAML 저장
 ```
 
-기본값은 `radj_enable=false`다. 이 모드에서는 base station 조합이나 새 PC의 SteamVR world frame이 달라도
-raw VR world를 그대로 두고 `T_AD`가 그 차이를 직접 흡수한다. tracker-to-TCP offset이 있는 상태에서 자세가 많이
-바뀌는 waypoint를 쓰면 position-only `R_Adj`가 오히려 틀어질 수 있으므로 일반 캘리브레이션은 이 기본값을 권장한다.
-
-기존 position-cloud `R_Adj` 방식을 실험하려면 `radj_enable=true`를 켠다. 이때 `radj_sample_count=0`이면
-`R_Adj` 계산에 captured sample 전체를 사용한다. 특정 개수만 쓰고 싶으면 양수로 지정한다.
-
-```bash
-ros2 run vr_calibration vr_calibration --ros-args \
-  -p radj_enable:=true \
-  -p radj_sample_count:=32
-```
+과거에는 이 앞에 position-cloud 기반 `R_Adj`(VR/robot point cloud를 Kabsch로 정렬하는 전역 회전 보정)
+단계가 있었다. `T_DC_adj[i] = T_Adj * T_DC[i]`처럼 모든 샘플에 동일한 고정 회전을 좌곱하는 형태였는데,
+hand-eye solve는 연속/전체 샘플 쌍의 상대운동(`inv(T0)*T1`)만 사용하므로 이 고정 회전은 그 차분에서
+정확히 상쇄되고, 이어지는 `T_AD` 평균 단계도 동일한 고정 회전을 정확히 역보정하는 방식으로 흡수한다.
+즉 `R_Adj` 값이 무엇이든 최종 calibrated pose(`M_cal`)는 수학적으로 완전히 동일했다 (직접 코드 상에서
+치환해 확인: `T_FIX*T_AD*T_Adj*raw*inv(T_BC) = T_FIX*(T_AD_noRadj*inv(T_Adj))*T_Adj*raw*inv(T_BC)
+= T_FIX*T_AD_noRadj*raw*inv(T_BC)`). 실제 운영 YAML도 이미 `R_Adj=Identity`였다. 아무 효과가 없는데
+파라미터/YAML 행렬/런타임 곱셈만 늘리고 있어 `R_Adj`/`radj_enable`/`radj_sample_count`를 완전히 제거했다.
 
 ## Runtime pose 의미
 
