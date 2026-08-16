@@ -268,7 +268,7 @@ public:
     // ----------------------------
     // T_SA params
     // ----------------------------
-    this->declare_parameter<double>("t_sa_w_des_z", 1.5707963267948966); // rad (≈ pi/2)
+    this->declare_parameter<double>("t_sa_w_des_z", 2.356194490192345); // rad (≈ 3*pi/4, 135deg home pose)
     this->declare_parameter<double>("t_sa_wait_timeout_s", 15.0);
     this->declare_parameter<double>("t_sa_hold_s", 0.25);
     this->declare_parameter<double>("t_sa_fresh_s", 1.0);
@@ -740,7 +740,7 @@ private:
   size_t cp_unit_probe_N_{30};
 
   // ---------- T_SA params ----------
-  double t_sa_w_des_z_{1.5707963267948966};
+  double t_sa_w_des_z_{2.356194490192345};  // rad (≈ 3*pi/4, 135deg home pose)
   double t_sa_wait_timeout_s_{15.0};
   double t_sa_hold_s_{0.25};
   double t_sa_fresh_s_{1.0};
