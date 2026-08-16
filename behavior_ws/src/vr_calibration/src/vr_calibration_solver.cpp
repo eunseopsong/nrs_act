@@ -199,8 +199,15 @@ bool solve_T_BC_and_T_AD_avg(
       return false;
     }
 
-    // Use consecutive pairs (i, i+1)
-    const size_t K = N - 1;
+    // Use ALL i<j pairs, not just consecutive (i, i+1) -- consecutive-only
+    // uses N-1 constraints out of the C(N,2) available from N captured
+    // samples (e.g. 31 of 496 possible at N=32, wasting ~94% of the
+    // captured data). All-pairs is standard practice in hand-eye
+    // calibration (same AX=XB formulation, just built from every relative
+    // motion instead of only frame-to-frame ones) and gives a much
+    // better-conditioned, noise-robust solve for the same captured
+    // samples -- no extra data collection required.
+    const size_t K = N * (N - 1) / 2;
 
     Eigen::MatrixXd M(9 * K, 9);
     Eigen::MatrixXd K1(3 * K, 3);
@@ -208,44 +215,40 @@ bool solve_T_BC_and_T_AD_avg(
 
     const Eigen::Matrix3d I = Eigen::Matrix3d::Identity();
 
-    // store for later
     std::vector<Eigen::Vector3d> O_B0B1_list;
     std::vector<Eigen::Vector3d> O_C0C1_list;
-    std::vector<Eigen::Matrix4d> T_AB0_list;
-    std::vector<Eigen::Matrix4d> T_DC0_list;
-
     O_B0B1_list.reserve(K);
     O_C0C1_list.reserve(K);
-    T_AB0_list.reserve(K);
-    T_DC0_list.reserve(K);
 
-    for (size_t i=0; i<K; i++) {
-      const Eigen::Matrix4d& T_AB0 = T_AB_all[i];
-      const Eigen::Matrix4d& T_AB1 = T_AB_all[i+1];
+    size_t k = 0;
+    for (size_t i=0; i<N; i++) {
+      for (size_t j=i+1; j<N; j++) {
+        const Eigen::Matrix4d& T_AB0 = T_AB_all[i];
+        const Eigen::Matrix4d& T_AB1 = T_AB_all[j];
 
-      const Eigen::Matrix4d& T_DC0 = T_DC_all[i];
-      const Eigen::Matrix4d& T_DC1 = T_DC_all[i+1];
+        const Eigen::Matrix4d& T_DC0 = T_DC_all[i];
+        const Eigen::Matrix4d& T_DC1 = T_DC_all[j];
 
-      const Eigen::Matrix4d T_B0B1 = invT(T_AB0) * T_AB1;
-      const Eigen::Matrix4d T_C0C1 = invT(T_DC0) * T_DC1;
+        const Eigen::Matrix4d T_B0B1 = invT(T_AB0) * T_AB1;
+        const Eigen::Matrix4d T_C0C1 = invT(T_DC0) * T_DC1;
 
-      const Eigen::Matrix3d R_B0B1 = T_B0B1.block<3,3>(0,0);
-      const Eigen::Vector3d O_B0B1 = T_B0B1.block<3,1>(0,3);
+        const Eigen::Matrix3d R_B0B1 = T_B0B1.block<3,3>(0,0);
+        const Eigen::Vector3d O_B0B1 = T_B0B1.block<3,1>(0,3);
 
-      const Eigen::Matrix3d R_C0C1 = T_C0C1.block<3,3>(0,0);
-      const Eigen::Vector3d O_C0C1 = T_C0C1.block<3,1>(0,3);
+        const Eigen::Matrix3d R_C0C1 = T_C0C1.block<3,3>(0,0);
+        const Eigen::Vector3d O_C0C1 = T_C0C1.block<3,1>(0,3);
 
-      // M block: kron(I, R_B0B1) - kron(R_C0C1^T, I)
-      const Eigen::Matrix<double,9,9> m = kron3(I, R_B0B1) - kron3(R_C0C1.transpose(), I);
-      M.block(9*i, 0, 9, 9) = m;
+        // M block: kron(I, R_B0B1) - kron(R_C0C1^T, I)
+        const Eigen::Matrix<double,9,9> m = kron3(I, R_B0B1) - kron3(R_C0C1.transpose(), I);
+        M.block(9*k, 0, 9, 9) = m;
 
-      // K1 block: (I - R_B0B1)
-      K1.block(3*i, 0, 3, 3) = (I - R_B0B1);
+        // K1 block: (I - R_B0B1)
+        K1.block(3*k, 0, 3, 3) = (I - R_B0B1);
 
-      O_B0B1_list.push_back(O_B0B1);
-      O_C0C1_list.push_back(O_C0C1);
-      T_AB0_list.push_back(T_AB0);
-      T_DC0_list.push_back(T_DC0);
+        O_B0B1_list.push_back(O_B0B1);
+        O_C0C1_list.push_back(O_C0C1);
+        k++;
+      }
     }
 
     // Rotation solve: smallest eigenvector of X = M^T M
@@ -271,24 +274,23 @@ bool solve_T_BC_and_T_AD_avg(
 
     // Translation solve:
     // K2 = O_B0B1 - R_BC * O_C0C1
-    for (size_t i=0; i<K; i++) {
-      const Eigen::Vector3d temp = O_B0B1_list[i] - R_BC * O_C0C1_list[i];
-      K2.segment<3>(3*i) = temp;
+    for (size_t idx=0; idx<K; idx++) {
+      const Eigen::Vector3d temp = O_B0B1_list[idx] - R_BC * O_C0C1_list[idx];
+      K2.segment<3>(3*idx) = temp;
     }
 
     const Eigen::Vector3d O_BC = K1.colPivHouseholderQr().solve(K2);
     const Eigen::Matrix4d T_BC = makeT(R_BC, O_BC);
 
-    // Compute T_AD_i and average
+    // Compute T_AD_i directly from every captured sample (not from pairs)
+    // and average -- N independent estimates instead of K pair-derived
+    // ones, since T_BC is now known.
     std::vector<Eigen::Quaterniond> quats;
-    quats.reserve(K);
+    quats.reserve(N);
     Eigen::Vector3d t_sum = Eigen::Vector3d::Zero();
 
-    for (size_t i=0; i<K; i++) {
-      const Eigen::Matrix4d& T_AB0 = T_AB0_list[i];
-      const Eigen::Matrix4d& T_DC0 = T_DC0_list[i];
-
-      const Eigen::Matrix4d T_AD_i = T_AB0 * T_BC * invT(T_DC0);
+    for (size_t i=0; i<N; i++) {
+      const Eigen::Matrix4d T_AD_i = T_AB_all[i] * T_BC * invT(T_DC_all[i]);
       const Eigen::Matrix3d R_i = T_AD_i.block<3,3>(0,0);
       const Eigen::Vector3d t_i = T_AD_i.block<3,1>(0,3);
 
@@ -299,7 +301,7 @@ bool solve_T_BC_and_T_AD_avg(
     }
 
     const Eigen::Quaterniond q_mean = averageQuaternionSignAligned(quats);
-    const Eigen::Vector3d t_mean = t_sum / static_cast<double>(K);
+    const Eigen::Vector3d t_mean = t_sum / static_cast<double>(N);
 
     const Eigen::Matrix4d T_AD_avg = makeT(q_mean.toRotationMatrix(), t_mean);
 
