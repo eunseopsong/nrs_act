@@ -107,8 +107,10 @@ pose별 force/torque residual을 계산하고, residual이 작은 good-quality p
 - `T_AD`: Vive world/raw frame을 robot base frame으로 올리는 base calibration
 - `T_BC`: robot EE에서 tracker/tool frame까지의 offset
 - `T_FIX`: z-plane residual을 줄이기 위한 left-multiplied rigid correction
-- `Z_RESIDUAL`: `T_FIX` 뒤에도 남는 xy 위치별 z 오차를 보정하는 quadratic_xy 모델
-- `XY_RESIDUAL`: `T_FIX`/`Z_RESIDUAL` 뒤에도 남는 xy 위치별 xy(평면) 오차를 보정하는 quadratic_xy 모델
+- `POSITION_RESIDUAL`: `T_FIX` 뒤에도 남는 xy 위치별 (dx,dy,dz) 오차를 하나로 묶어 보정하는 quadratic_xy 모델
+  (예전에는 z만 보정하는 `Z_RESIDUAL`, xy만 보정하는 `XY_RESIDUAL` 두 모델로 나뉘어 있었다. 둘 다 같은
+  정규화(center/scale)에 같은 quadratic_xy basis를 쓰는 사실상 같은 모델이었고 굳이 나눠 저장/적용할
+  이유가 없어서 하나로 합쳤다.)
 - `T_CE`: final constant offset. `T_CE[2,3]` is stored as a positive z correction knob.
 - `T_SA`: orientation display/alignment용 right-multiplied rotation correction
 
@@ -150,10 +152,8 @@ handeye_outlier_max_reject = 2
 handeye_outlier_abs_mm = 15.0
 handeye_outlier_mad_sigma = 4.0
 z_fix_enable = true
-z_residual_enable = true
-z_residual_max_correction_mm = 10.0
-xy_residual_enable = true
-xy_residual_max_correction_mm = 10.0
+position_residual_enable = true
+position_residual_max_correction_mm = 10.0
 max_calib_position_rms_mm = 50.0
 ```
 
@@ -186,13 +186,12 @@ best window는 VR position std, robot linear/angular velocity, target dist/angle
 - VR position std가 `capture_max_vr_std_mm`를 넘으면 캡처를 보류
 - target을 떠나는 순간에도 clean buffer가 이미 유효하면 `[OUT_CAPTURE]`로 그 window를 저장하고 다음 target으로 진행한다.
 - hand-eye 초벌 solve 뒤 residual이 큰 sample은 `[OUTLIER]`로 최대 `handeye_outlier_max_reject`개까지 제외하고 다시 solve한다.
-- `T_FIX` 뒤에도 XY 위치별 Z 오차가 남으면 `Z_RESIDUAL` quadratic_xy 모델을 저장한다.
-  runtime은 이 모델이 있으면 `T_FIX` 적용 직후 z값만 `z += f(x,y)`로 보정한다.
-- `T_FIX`/`Z_RESIDUAL` 뒤에도 XY 위치별 XY(평면) 오차가 남으면 `XY_RESIDUAL` quadratic_xy 모델을 저장한다
-  (샘플 8개 이상 필요, fit RMS가 개선될 때만 저장). runtime은 `Z_RESIDUAL` 적용 뒤 x,y에 `x += fx(x,y)`,
-  `y += fy(x,y)`를 더하며, `(dx,dy)` 벡터 크기를 `xy_residual_max_correction_mm`로 clamp한다.
-  `T_FIX`/`Z_RESIDUAL`은 z만 보정했으므로, hand-eye solve의 xy 평면 왜곡(트래커 스케일 오차,
-  추적 볼륨 비선형성 등)은 이전까지 보정 없이 그대로 데이터셋에 남아 있었다.
+- `T_FIX` 뒤에도 XY 위치별 (dx,dy,dz) 오차가 남으면 `POSITION_RESIDUAL` quadratic_xy 모델을 저장한다
+  (샘플 8개 이상 필요, fit RMS가 개선될 때만 저장). runtime은 `T_FIX` 적용 직후 x,y,z에
+  `x += fx(x,y)`, `y += fy(x,y)`, `z += fz(x,y)`를 더하며, `(dx,dy,dz)` 벡터 크기를
+  `position_residual_max_correction_mm`로 clamp한다. `T_FIX`는 rigid(기울기+z-offset)만
+  보정하므로, hand-eye solve에 남는 매끄러운 비강체 왜곡(트래커 스케일 오차, 추적 볼륨
+  비선형성 등)은 이 모델이 없으면 그대로 데이터셋에 남는다.
 
 캡처 로그 예:
 
@@ -218,10 +217,9 @@ T_DC[i] = VR world(D) -> tracker(C)
 3. 각 sample에서 T_AD_i = T_AB[i] * T_BC * inv(T_DC[i]) 계산
 4. T_AD_i 평균으로 T_AD 생성
 5. T_FIX 계산
-6. Z_RESIDUAL 계산 (T_FIX 이후 z 잔차)
-7. XY_RESIDUAL 계산 (T_FIX/Z_RESIDUAL 이후 xy 잔차)
-8. runtime-chain residual 검증
-9. YAML 저장
+6. POSITION_RESIDUAL 계산 (T_FIX 이후 (dx,dy,dz) 잔차, 하나의 joint 모델)
+7. runtime-chain residual 검증
+8. YAML 저장
 ```
 
 과거에는 이 앞에 position-cloud 기반 `R_Adj`(VR/robot point cloud를 Kabsch로 정렬하는 전역 회전 보정)

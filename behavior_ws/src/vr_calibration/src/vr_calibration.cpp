@@ -280,10 +280,8 @@ public:
     this->declare_parameter<double>("t_sa_max_delta_deg", 180.0); // update 시 old->new 변화량 제한
     this->declare_parameter<bool>("z_fix_enable", true);
     this->declare_parameter<double>("z_fix_max_tilt_deg", 5.0);
-    this->declare_parameter<bool>("z_residual_enable", true);
-    this->declare_parameter<double>("z_residual_max_correction_mm", 10.0);
-    this->declare_parameter<bool>("xy_residual_enable", true);
-    this->declare_parameter<double>("xy_residual_max_correction_mm", 10.0);
+    this->declare_parameter<bool>("position_residual_enable", true);
+    this->declare_parameter<double>("position_residual_max_correction_mm", 10.0);
     this->declare_parameter<std::string>("waypoint_file", waypoint_file_);
     this->declare_parameter<std::string>("ee_output_file", ee_path_);
     this->declare_parameter<std::string>("vr_output_file", vr_path_);
@@ -338,12 +336,9 @@ public:
     t_sa_max_delta_deg_  = this->get_parameter("t_sa_max_delta_deg").as_double();
     z_fix_enable_        = this->get_parameter("z_fix_enable").as_bool();
     z_fix_max_tilt_deg_  = this->get_parameter("z_fix_max_tilt_deg").as_double();
-    z_residual_enable_   = this->get_parameter("z_residual_enable").as_bool();
-    z_residual_max_correction_m_ =
-      std::max(0.0, this->get_parameter("z_residual_max_correction_mm").as_double()) * 1e-3;
-    xy_residual_enable_  = this->get_parameter("xy_residual_enable").as_bool();
-    xy_residual_max_correction_m_ =
-      std::max(0.0, this->get_parameter("xy_residual_max_correction_mm").as_double()) * 1e-3;
+    position_residual_enable_ = this->get_parameter("position_residual_enable").as_bool();
+    position_residual_max_correction_m_ =
+      std::max(0.0, this->get_parameter("position_residual_max_correction_mm").as_double()) * 1e-3;
     waypoint_file_       = this->get_parameter("waypoint_file").as_string();
     ee_path_             = this->get_parameter("ee_output_file").as_string();
     vr_path_             = this->get_parameter("vr_output_file").as_string();
@@ -792,14 +787,10 @@ private:
   // z-plane correction: left-multiplied rigid fix after base calibration
   bool z_fix_enable_{true};
   double z_fix_max_tilt_deg_{5.0};
-  bool z_residual_enable_{true};
-  double z_residual_max_correction_m_{0.010};
-  // xy-plane residual: same quadratic-in-xy model as Z_RESIDUAL, but
-  // corrects the in-plane (x,y) position instead of z. Z_RESIDUAL/T_FIX
-  // never touched x,y, so any non-flat, non-rigid distortion in the
-  // hand-eye fit's xy plane previously went uncorrected.
-  bool xy_residual_enable_{true};
-  double xy_residual_max_correction_m_{0.010};
+  // position residual after T_FIX: quadratic-in-xy fit for (dx,dy,dz),
+  // clamped as one joint 3D vector.
+  bool position_residual_enable_{true};
+  double position_residual_max_correction_m_{0.010};
 
   // ---------- units ----------
   bool wp_rotvec_in_degrees_{false};
@@ -895,20 +886,11 @@ private:
   // computed outputs
   Eigen::Matrix4d T_FIX_ = Eigen::Matrix4d::Identity();
 
-  struct ZResidualModel
-  {
-    bool valid{false};
-    double center_x{0.0};
-    double center_y{0.0};
-    double scale_xy{1.0};
-    double max_abs_correction_m{0.012};
-    std::array<double,6> coeff{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
-    double rms_before_m{0.0};
-    double rms_after_m{0.0};
-  };
-  ZResidualModel z_residual_model_;
-
-  struct XYResidualModel
+  // Single post-T_FIX residual model: fits (dx,dy,dz) as one quadratic-in-xy
+  // surface each, sharing one center/scale/clamp. Z_RESIDUAL and XY_RESIDUAL
+  // used to be two separate models with identical structure/normalization;
+  // merged into one since there was no reason to keep them apart.
+  struct PositionResidualModel
   {
     bool valid{false};
     double center_x{0.0};
@@ -917,10 +899,11 @@ private:
     double max_abs_correction_m{0.010};
     std::array<double,6> coeff_x{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
     std::array<double,6> coeff_y{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+    std::array<double,6> coeff_z{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
     double rms_before_m{0.0};
     double rms_after_m{0.0};
   };
-  XYResidualModel xy_residual_model_;
+  PositionResidualModel position_residual_model_;
 
   bool t_sa_computed_{false};
   Eigen::Matrix4d T_SA_new_ = Eigen::Matrix4d::Identity();
@@ -2005,40 +1988,22 @@ private:
     return T_fix;
   }
 
-  double evalZResidualCorrectionM(const ZResidualModel& model, double x, double y) const
+  // Evaluates the fitted (dx,dy,dz) correction at (x,y), with a joint
+  // vector-norm clamp so the correction never moves a point by more than
+  // max_abs_correction_m in any direction.
+  Eigen::Vector3d evalPositionResidualCorrectionM(const PositionResidualModel& model, double x, double y) const
   {
-    if (!model.valid) return 0.0;
-    const double s = std::max(1e-6, model.scale_xy);
-    const double xn = (x - model.center_x) / s;
-    const double yn = (y - model.center_y) / s;
-    const auto& c = model.coeff;
-    const double dz =
-      c[0] + c[1] * xn + c[2] * yn + c[3] * xn * xn + c[4] * xn * yn + c[5] * yn * yn;
-    return clampd(dz, -model.max_abs_correction_m, model.max_abs_correction_m);
-  }
-
-  Eigen::Vector3d applyZResidualToPoint(const Eigen::Vector3d& p) const
-  {
-    Eigen::Vector3d out = p;
-    out.z() += evalZResidualCorrectionM(z_residual_model_, p.x(), p.y());
-    return out;
-  }
-
-  // Evaluates the fitted xy correction (dx,dy) at (x,y), with a joint
-  // vector-norm clamp so the correction never distorts the plane by more
-  // than max_abs_correction_m in any direction (mirrors the scalar clamp
-  // used for the z-only residual).
-  Eigen::Vector2d evalXYResidualCorrectionM(const XYResidualModel& model, double x, double y) const
-  {
-    if (!model.valid) return Eigen::Vector2d::Zero();
+    if (!model.valid) return Eigen::Vector3d::Zero();
     const double s = std::max(1e-6, model.scale_xy);
     const double xn = (x - model.center_x) / s;
     const double yn = (y - model.center_y) / s;
     const auto& cx = model.coeff_x;
     const auto& cy = model.coeff_y;
-    Eigen::Vector2d d(
+    const auto& cz = model.coeff_z;
+    Eigen::Vector3d d(
       cx[0] + cx[1] * xn + cx[2] * yn + cx[3] * xn * xn + cx[4] * xn * yn + cx[5] * yn * yn,
-      cy[0] + cy[1] * xn + cy[2] * yn + cy[3] * xn * xn + cy[4] * xn * yn + cy[5] * yn * yn);
+      cy[0] + cy[1] * xn + cy[2] * yn + cy[3] * xn * xn + cy[4] * xn * yn + cy[5] * yn * yn,
+      cz[0] + cz[1] * xn + cz[2] * yn + cz[3] * xn * xn + cz[4] * xn * yn + cz[5] * yn * yn);
     const double mag = d.norm();
     if (mag > model.max_abs_correction_m && mag > 1e-12) {
       d *= (model.max_abs_correction_m / mag);
@@ -2046,20 +2011,15 @@ private:
     return d;
   }
 
-  Eigen::Vector3d applyXYResidualToPoint(const Eigen::Vector3d& p) const
+  Eigen::Vector3d applyPositionResidualToPoint(const Eigen::Vector3d& p) const
   {
-    Eigen::Vector3d out = p;
-    const Eigen::Vector2d d = evalXYResidualCorrectionM(xy_residual_model_, p.x(), p.y());
-    out.x() += d.x();
-    out.y() += d.y();
-    return out;
+    return p + evalPositionResidualCorrectionM(position_residual_model_, p.x(), p.y());
   }
 
   std::vector<double> computeCalibrationPositionResidualsMm(const Eigen::Matrix4d& T_AD,
                                                             const Eigen::Matrix4d& T_BC,
                                                             const Eigen::Matrix4d& T_FIX,
-                                                            bool apply_z_residual,
-                                                            bool apply_xy_residual = false) const
+                                                            bool apply_position_residual) const
   {
     const size_t N = T_AB_all_.size();
     if (N == 0 || T_DC_all_.size() != N) {
@@ -2073,11 +2033,8 @@ private:
     for (size_t i=0; i<N; ++i) {
       const Eigen::Matrix4d M_cal = T_FIX * T_AD * T_DC_all_[i] * T_CB;
       Eigen::Vector3d p_cal = M_cal.block<3,1>(0,3);
-      if (apply_z_residual) {
-        p_cal.z() += evalZResidualCorrectionM(z_residual_model_, p_cal.x(), p_cal.y());
-      }
-      if (apply_xy_residual) {
-        p_cal = applyXYResidualToPoint(p_cal);
+      if (apply_position_residual) {
+        p_cal = applyPositionResidualToPoint(p_cal);
       }
       const Eigen::Vector3d p_ref = T_AB_all_[i].block<3,1>(0,3);
       residuals_mm.push_back((p_ref - p_cal).norm() * 1000.0);
@@ -2142,152 +2099,37 @@ private:
     return true;
   }
 
-  ZResidualModel computeZResidualModel(const Eigen::Matrix4d& T_AD,
-                                       const Eigen::Matrix4d& T_BC,
-                                       const Eigen::Matrix4d& T_FIX)
+  // Quadratic-in-xy fit for the (dx,dy,dz) residual left over after
+  // T_BC/T_AD/T_FIX (which only ever correct a rigid tilt+z-offset), fit
+  // simultaneously as one model with a shared center/scale/clamp.
+  PositionResidualModel computePositionResidualModel(const Eigen::Matrix4d& T_AD,
+                                                      const Eigen::Matrix4d& T_BC,
+                                                      const Eigen::Matrix4d& T_FIX)
   {
-    ZResidualModel model;
-    model.max_abs_correction_m = z_residual_max_correction_m_;
+    PositionResidualModel model;
+    model.max_abs_correction_m = position_residual_max_correction_m_;
     const size_t N = T_AB_all_.size();
-    if (!z_residual_enable_) {
-      RCLCPP_INFO(get_logger(), "[Z_RES] disabled");
-      return model;
-    }
-    if (N < 6 || T_DC_all_.size() != N) {
-      RCLCPP_WARN(get_logger(), "[Z_RES] need >=6; disabled");
-      return model;
-    }
-    if (model.max_abs_correction_m <= 0.0) {
-      RCLCPP_WARN(get_logger(), "[Z_RES] max correction zero");
-      return model;
-    }
-
-    const Eigen::Matrix4d T_CB = invT(T_BC);
-
-    std::vector<Eigen::Vector3d> p_list;
-    std::vector<double> dz_list;
-    p_list.reserve(N);
-    dz_list.reserve(N);
-
-    Eigen::Vector2d xy_mean = Eigen::Vector2d::Zero();
-    for (size_t i=0; i<N; ++i) {
-      const Eigen::Matrix4d M_cal = T_FIX * T_AD * T_DC_all_[i] * T_CB;
-      const Eigen::Vector3d p_cal = M_cal.block<3,1>(0,3);
-      const double z_ref = T_AB_all_[i](2,3);
-      p_list.push_back(p_cal);
-      dz_list.push_back(z_ref - p_cal.z());
-      xy_mean += p_cal.head<2>();
-    }
-    xy_mean /= static_cast<double>(N);
-
-    double max_radius = 0.0;
-    for (const auto& p : p_list) {
-      max_radius = std::max(max_radius, (p.head<2>() - xy_mean).norm());
-    }
-    model.center_x = xy_mean.x();
-    model.center_y = xy_mean.y();
-    model.scale_xy = std::max(0.05, max_radius);
-
-    Eigen::MatrixXd A(static_cast<Eigen::Index>(N), 6);
-    Eigen::VectorXd b(static_cast<Eigen::Index>(N));
-    for (size_t i=0; i<N; ++i) {
-      const double xn = (p_list[i].x() - model.center_x) / model.scale_xy;
-      const double yn = (p_list[i].y() - model.center_y) / model.scale_xy;
-      A(static_cast<Eigen::Index>(i), 0) = 1.0;
-      A(static_cast<Eigen::Index>(i), 1) = xn;
-      A(static_cast<Eigen::Index>(i), 2) = yn;
-      A(static_cast<Eigen::Index>(i), 3) = xn * xn;
-      A(static_cast<Eigen::Index>(i), 4) = xn * yn;
-      A(static_cast<Eigen::Index>(i), 5) = yn * yn;
-      b(static_cast<Eigen::Index>(i)) = dz_list[i];
-    }
-
-    const Eigen::VectorXd coeff = A.colPivHouseholderQr().solve(b);
-    if (coeff.size() != 6 || !coeff.allFinite()) {
-      RCLCPP_WARN(get_logger(), "[Z_RES] solve failed");
-      return model;
-    }
-    for (int i=0; i<6; ++i) model.coeff[static_cast<size_t>(i)] = coeff(i);
-    model.valid = true;
-
-    double max_abs_fit = 0.0;
-    double rms_before = 0.0;
-    for (size_t i=0; i<N; ++i) {
-      const double dz_fit = evalZResidualCorrectionM(model, p_list[i].x(), p_list[i].y());
-      max_abs_fit = std::max(max_abs_fit, std::fabs(dz_fit));
-      rms_before += dz_list[i] * dz_list[i];
-    }
-    if (max_abs_fit > model.max_abs_correction_m && max_abs_fit > 1e-12) {
-      const double scale = model.max_abs_correction_m / max_abs_fit;
-      for (double& c : model.coeff) c *= scale;
-      RCLCPP_WARN(get_logger(),
-        "[Z_RES] fit %.3f > clamp %.3fmm",
-        max_abs_fit * 1000.0, model.max_abs_correction_m * 1000.0);
-    }
-
-    double rms_after = 0.0;
-    double max_after = 0.0;
-    for (size_t i=0; i<N; ++i) {
-      const double dz_after =
-        dz_list[i] - evalZResidualCorrectionM(model, p_list[i].x(), p_list[i].y());
-      rms_after += dz_after * dz_after;
-      max_after = std::max(max_after, std::fabs(dz_after));
-    }
-    model.rms_before_m = std::sqrt(rms_before / static_cast<double>(N));
-    model.rms_after_m = std::sqrt(rms_after / static_cast<double>(N));
-
-    if (model.rms_after_m >= model.rms_before_m) {
-      RCLCPP_WARN(get_logger(),
-        "[Z_RES] no gain %.3f -> %.3fmm",
-        model.rms_before_m * 1000.0, model.rms_after_m * 1000.0);
-      model.valid = false;
-      return model;
-    }
-
-    RCLCPP_INFO(get_logger(),
-      "[Z_RES] z_rms %.3f -> %.3fmm",
-      model.rms_before_m * 1000.0,
-      model.rms_after_m * 1000.0);
-    RCLCPP_INFO(get_logger(),
-      "[Z_RES] max=%.3fmm clamp=%.1fmm",
-      max_after * 1000.0,
-      model.max_abs_correction_m * 1000.0);
-    return model;
-  }
-
-  // Same quadratic-in-xy fit as computeZResidualModel, but for the
-  // in-plane (dx,dy) residual left over after T_BC/T_AD/T_FIX. T_FIX and
-  // Z_RESIDUAL only ever correct z, so any smooth xy-plane distortion in
-  // the hand-eye solve (VR-tracker lens/tracking-volume nonlinearity,
-  // residual scale error, etc.) previously passed straight through into
-  // the recorded dataset positions uncorrected.
-  XYResidualModel computeXYResidualModel(const Eigen::Matrix4d& T_AD,
-                                         const Eigen::Matrix4d& T_BC,
-                                         const Eigen::Matrix4d& T_FIX)
-  {
-    XYResidualModel model;
-    model.max_abs_correction_m = xy_residual_max_correction_m_;
-    const size_t N = T_AB_all_.size();
-    if (!xy_residual_enable_) {
-      RCLCPP_INFO(get_logger(), "[XY_RES] disabled");
+    if (!position_residual_enable_) {
+      RCLCPP_INFO(get_logger(), "[POS_RES] disabled");
       return model;
     }
     if (N < 8 || T_DC_all_.size() != N) {
-      RCLCPP_WARN(get_logger(), "[XY_RES] need >=8; disabled");
+      RCLCPP_WARN(get_logger(), "[POS_RES] need >=8; disabled");
       return model;
     }
     if (model.max_abs_correction_m <= 0.0) {
-      RCLCPP_WARN(get_logger(), "[XY_RES] max correction zero");
+      RCLCPP_WARN(get_logger(), "[POS_RES] max correction zero");
       return model;
     }
 
     const Eigen::Matrix4d T_CB = invT(T_BC);
 
     std::vector<Eigen::Vector3d> p_list;
-    std::vector<double> dx_list, dy_list;
+    std::vector<double> dx_list, dy_list, dz_list;
     p_list.reserve(N);
     dx_list.reserve(N);
     dy_list.reserve(N);
+    dz_list.reserve(N);
 
     Eigen::Vector2d xy_mean = Eigen::Vector2d::Zero();
     for (size_t i=0; i<N; ++i) {
@@ -2297,6 +2139,7 @@ private:
       p_list.push_back(p_cal);
       dx_list.push_back(p_ref3.x() - p_cal.x());
       dy_list.push_back(p_ref3.y() - p_cal.y());
+      dz_list.push_back(p_ref3.z() - p_cal.z());
       xy_mean += p_cal.head<2>();
     }
     xy_mean /= static_cast<double>(N);
@@ -2312,6 +2155,7 @@ private:
     Eigen::MatrixXd A(static_cast<Eigen::Index>(N), 6);
     Eigen::VectorXd bx(static_cast<Eigen::Index>(N));
     Eigen::VectorXd by(static_cast<Eigen::Index>(N));
+    Eigen::VectorXd bz(static_cast<Eigen::Index>(N));
     for (size_t i=0; i<N; ++i) {
       const double xn = (p_list[i].x() - model.center_x) / model.scale_xy;
       const double yn = (p_list[i].y() - model.center_y) / model.scale_xy;
@@ -2323,66 +2167,71 @@ private:
       A(static_cast<Eigen::Index>(i), 5) = yn * yn;
       bx(static_cast<Eigen::Index>(i)) = dx_list[i];
       by(static_cast<Eigen::Index>(i)) = dy_list[i];
+      bz(static_cast<Eigen::Index>(i)) = dz_list[i];
     }
 
     const auto qr = A.colPivHouseholderQr();
     const Eigen::VectorXd coeff_x = qr.solve(bx);
     const Eigen::VectorXd coeff_y = qr.solve(by);
-    if (coeff_x.size() != 6 || coeff_y.size() != 6 ||
-        !coeff_x.allFinite() || !coeff_y.allFinite()) {
-      RCLCPP_WARN(get_logger(), "[XY_RES] solve failed");
+    const Eigen::VectorXd coeff_z = qr.solve(bz);
+    if (coeff_x.size() != 6 || coeff_y.size() != 6 || coeff_z.size() != 6 ||
+        !coeff_x.allFinite() || !coeff_y.allFinite() || !coeff_z.allFinite()) {
+      RCLCPP_WARN(get_logger(), "[POS_RES] solve failed");
       return model;
     }
     for (int i=0; i<6; ++i) {
       model.coeff_x[static_cast<size_t>(i)] = coeff_x(i);
       model.coeff_y[static_cast<size_t>(i)] = coeff_y(i);
+      model.coeff_z[static_cast<size_t>(i)] = coeff_z(i);
     }
     model.valid = true;
 
     double max_abs_fit = 0.0;
     double rms_before = 0.0;
     for (size_t i=0; i<N; ++i) {
-      const Eigen::Vector2d d_fit =
-        evalXYResidualCorrectionM(model, p_list[i].x(), p_list[i].y());
+      const Eigen::Vector3d d_fit =
+        evalPositionResidualCorrectionM(model, p_list[i].x(), p_list[i].y());
       max_abs_fit = std::max(max_abs_fit, d_fit.norm());
-      rms_before += dx_list[i]*dx_list[i] + dy_list[i]*dy_list[i];
+      rms_before += dx_list[i]*dx_list[i] + dy_list[i]*dy_list[i] + dz_list[i]*dz_list[i];
     }
     if (max_abs_fit > model.max_abs_correction_m && max_abs_fit > 1e-12) {
       const double scale = model.max_abs_correction_m / max_abs_fit;
       for (double& c : model.coeff_x) c *= scale;
       for (double& c : model.coeff_y) c *= scale;
+      for (double& c : model.coeff_z) c *= scale;
       RCLCPP_WARN(get_logger(),
-        "[XY_RES] fit %.3f > clamp %.3fmm",
+        "[POS_RES] fit %.3f > clamp %.3fmm",
         max_abs_fit * 1000.0, model.max_abs_correction_m * 1000.0);
     }
 
     double rms_after = 0.0;
     double max_after = 0.0;
     for (size_t i=0; i<N; ++i) {
-      const Eigen::Vector2d d_after =
-        evalXYResidualCorrectionM(model, p_list[i].x(), p_list[i].y());
+      const Eigen::Vector3d d_after =
+        evalPositionResidualCorrectionM(model, p_list[i].x(), p_list[i].y());
       const double ex = dx_list[i] - d_after.x();
       const double ey = dy_list[i] - d_after.y();
-      rms_after += ex*ex + ey*ey;
-      max_after = std::max(max_after, std::sqrt(ex*ex + ey*ey));
+      const double ez = dz_list[i] - d_after.z();
+      rms_after += ex*ex + ey*ey + ez*ez;
+      max_after = std::max(max_after, std::sqrt(ex*ex + ey*ey + ez*ez));
     }
     model.rms_before_m = std::sqrt(rms_before / static_cast<double>(N));
     model.rms_after_m = std::sqrt(rms_after / static_cast<double>(N));
 
     if (model.rms_after_m >= model.rms_before_m) {
       RCLCPP_WARN(get_logger(),
-        "[XY_RES] no gain %.3f -> %.3fmm",
+        "[POS_RES] no gain %.3f -> %.3fmm",
         model.rms_before_m * 1000.0, model.rms_after_m * 1000.0);
       model.valid = false;
       return model;
     }
 
     RCLCPP_INFO(get_logger(),
-      "[XY_RES] xy_rms %.3f -> %.3fmm",
+      "[POS_RES] rms %.3f -> %.3fmm",
       model.rms_before_m * 1000.0,
       model.rms_after_m * 1000.0);
     RCLCPP_INFO(get_logger(),
-      "[XY_RES] max=%.3fmm clamp=%.1fmm",
+      "[POS_RES] max=%.3fmm clamp=%.1fmm",
       max_after * 1000.0,
       model.max_abs_correction_m * 1000.0);
     return model;
@@ -2408,7 +2257,7 @@ private:
     for (size_t i=0; i<N; ++i) {
       const Eigen::Matrix4d M_cal = T_FIX * T_AD * T_DC_all_[i] * T_CB;
       const Eigen::Vector3d p_cal =
-        applyXYResidualToPoint(applyZResidualToPoint(M_cal.block<3,1>(0,3)));
+        applyPositionResidualToPoint(M_cal.block<3,1>(0,3));
       const Eigen::Vector3d p_ref = T_AB_all_[i].block<3,1>(0,3);
       const double err = (p_ref - p_cal).norm();
       sum2 += err * err;
@@ -3102,11 +2951,7 @@ private:
     T_FIX_ = computeZPlaneFix(
       T_AD_avg,
       T_BC);
-    z_residual_model_ = computeZResidualModel(
-      T_AD_avg,
-      T_BC,
-      T_FIX_);
-    xy_residual_model_ = computeXYResidualModel(
+    position_residual_model_ = computePositionResidualModel(
       T_AD_avg,
       T_BC,
       T_FIX_);
@@ -3172,12 +3017,9 @@ private:
     ofs << "  t_sa_w_des_z: " << std::fixed << std::setprecision(prec) << t_sa_w_des_z_ << "\n";
     ofs << "  z_fix_enable: " << (z_fix_enable_ ? "true" : "false") << "\n";
     ofs << "  z_fix_max_tilt_deg: " << std::fixed << std::setprecision(prec) << z_fix_max_tilt_deg_ << "\n";
-    ofs << "  z_residual_enable: " << (z_residual_enable_ ? "true" : "false") << "\n";
-    ofs << "  z_residual_max_correction_mm: " << std::fixed << std::setprecision(prec)
-        << z_residual_max_correction_m_ * 1000.0 << "\n";
-    ofs << "  xy_residual_enable: " << (xy_residual_enable_ ? "true" : "false") << "\n";
-    ofs << "  xy_residual_max_correction_mm: " << std::fixed << std::setprecision(prec)
-        << xy_residual_max_correction_m_ * 1000.0 << "\n";
+    ofs << "  position_residual_enable: " << (position_residual_enable_ ? "true" : "false") << "\n";
+    ofs << "  position_residual_max_correction_mm: " << std::fixed << std::setprecision(prec)
+        << position_residual_max_correction_m_ * 1000.0 << "\n";
     ofs << "  handeye_outlier_reject_enable: " << (handeye_outlier_reject_enable_ ? "true" : "false") << "\n";
     ofs << "  handeye_outlier_max_reject: " << handeye_outlier_max_reject_ << "\n";
     ofs << "  handeye_outlier_abs_mm: " << std::fixed << std::setprecision(prec)
@@ -3208,47 +3050,35 @@ private:
     ofs << "# left-multiplied rigid z-plane correction (M_cal = T_FIX @ M_cal)\n";
     writeMat4("T_FIX", T_FIX);
 
-    ofs << "# optional z-only residual correction after T_FIX: z += f((x-center_x)/scale_xy, (y-center_y)/scale_xy)\n";
-    ofs << "Z_RESIDUAL:\n";
-    ofs << "  enabled: " << (z_residual_model_.valid ? "true" : "false") << "\n";
+    ofs << "# optional position residual correction after T_FIX:\n";
+    ofs << "# (x,y,z) += (fx,fy,fz)((x-center_x)/scale_xy, (y-center_y)/scale_xy),\n";
+    ofs << "# joint (dx,dy,dz) vector clamped to max_abs_correction_m.\n";
+    ofs << "POSITION_RESIDUAL:\n";
+    ofs << "  enabled: " << (position_residual_model_.valid ? "true" : "false") << "\n";
     ofs << std::fixed << std::setprecision(prec);
     ofs << "  model: quadratic_xy\n";
-    ofs << "  center_x: " << z_residual_model_.center_x << "\n";
-    ofs << "  center_y: " << z_residual_model_.center_y << "\n";
-    ofs << "  scale_xy: " << z_residual_model_.scale_xy << "\n";
-    ofs << "  max_abs_correction_m: " << z_residual_model_.max_abs_correction_m << "\n";
-    ofs << "  rms_before_m: " << z_residual_model_.rms_before_m << "\n";
-    ofs << "  rms_after_m: " << z_residual_model_.rms_after_m << "\n";
-    ofs << "  coeff: [";
-    for (size_t i=0; i<z_residual_model_.coeff.size(); ++i) {
-      ofs << z_residual_model_.coeff[i];
-      if (i + 1 < z_residual_model_.coeff.size()) ofs << ", ";
-    }
-    ofs << "]\n\n";
-
-    ofs << "# optional xy-plane residual correction after T_FIX/Z_RESIDUAL:\n";
-    ofs << "# x += fx(xn,yn), y += fy(xn,yn), same normalization as Z_RESIDUAL,\n";
-    ofs << "# joint (dx,dy) vector clamped to max_abs_correction_m.\n";
-    ofs << "XY_RESIDUAL:\n";
-    ofs << "  enabled: " << (xy_residual_model_.valid ? "true" : "false") << "\n";
-    ofs << std::fixed << std::setprecision(prec);
-    ofs << "  model: quadratic_xy\n";
-    ofs << "  center_x: " << xy_residual_model_.center_x << "\n";
-    ofs << "  center_y: " << xy_residual_model_.center_y << "\n";
-    ofs << "  scale_xy: " << xy_residual_model_.scale_xy << "\n";
-    ofs << "  max_abs_correction_m: " << xy_residual_model_.max_abs_correction_m << "\n";
-    ofs << "  rms_before_m: " << xy_residual_model_.rms_before_m << "\n";
-    ofs << "  rms_after_m: " << xy_residual_model_.rms_after_m << "\n";
+    ofs << "  center_x: " << position_residual_model_.center_x << "\n";
+    ofs << "  center_y: " << position_residual_model_.center_y << "\n";
+    ofs << "  scale_xy: " << position_residual_model_.scale_xy << "\n";
+    ofs << "  max_abs_correction_m: " << position_residual_model_.max_abs_correction_m << "\n";
+    ofs << "  rms_before_m: " << position_residual_model_.rms_before_m << "\n";
+    ofs << "  rms_after_m: " << position_residual_model_.rms_after_m << "\n";
     ofs << "  coeff_x: [";
-    for (size_t i=0; i<xy_residual_model_.coeff_x.size(); ++i) {
-      ofs << xy_residual_model_.coeff_x[i];
-      if (i + 1 < xy_residual_model_.coeff_x.size()) ofs << ", ";
+    for (size_t i=0; i<position_residual_model_.coeff_x.size(); ++i) {
+      ofs << position_residual_model_.coeff_x[i];
+      if (i + 1 < position_residual_model_.coeff_x.size()) ofs << ", ";
     }
     ofs << "]\n";
     ofs << "  coeff_y: [";
-    for (size_t i=0; i<xy_residual_model_.coeff_y.size(); ++i) {
-      ofs << xy_residual_model_.coeff_y[i];
-      if (i + 1 < xy_residual_model_.coeff_y.size()) ofs << ", ";
+    for (size_t i=0; i<position_residual_model_.coeff_y.size(); ++i) {
+      ofs << position_residual_model_.coeff_y[i];
+      if (i + 1 < position_residual_model_.coeff_y.size()) ofs << ", ";
+    }
+    ofs << "]\n";
+    ofs << "  coeff_z: [";
+    for (size_t i=0; i<position_residual_model_.coeff_z.size(); ++i) {
+      ofs << position_residual_model_.coeff_z[i];
+      if (i + 1 < position_residual_model_.coeff_z.size()) ofs << ", ";
     }
     ofs << "]\n\n";
 
