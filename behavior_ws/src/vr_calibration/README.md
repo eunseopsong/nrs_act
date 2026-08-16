@@ -262,24 +262,26 @@ ros2 run vive_tracker_ros2 vive_tracker_node --ros-args \
 캘리브레이션이 정상적으로 끝나면 다음 로그를 확인한다.
 
 ```text
-[R_ADJ_DONE] multi-point position fit using N/N samples
-[T_FIX] z-plane rigid fix computed ...
-[CALIB_VALIDATE] runtime-chain position fit: rms=... max=...
+[HAND_EYE] using all-pairs motions K=... from N=... samples
+[HAND_EYE] sign=... fit_rms=...mm alt=...
+[T_FIX] rx=... ry=... tz=...mm
+[POS_RES] rms ... -> ...mm
+[VALID] rms=...mm max=...mm
 [YAML_SAVED] ...
 ```
 
 `T_SA` update를 켠 경우에는 다음 로그가 있어야 한다.
 
 ```text
-[T_SA_DONE] ...
-[T_SA] Pre-capture update done.
+[T_SA_DONE] delta=...deg
+[T_SA] pre-capture done
 ```
 
 다음 로그가 반복되면 clean sample 조건이 너무 빡빡한 것이다.
 
 ```text
-[WAIT_CLEAN_CAPTURE] clean_samples=...
-[WAIT_CLEAN_CAPTURE] VR position std ... exceeds ...
+[WAIT] hold=.../...s n=.../...
+[WAIT] vr_std ... > ...mm
 ```
 
 이 경우 먼저 `/raw_pose` publish rate와 tracking 상태를 확인하고, 필요하면 `max_capture_sync_dt_s`, `capture_min_clean_samples`, `capture_max_vr_std_mm`를 완화한다.
