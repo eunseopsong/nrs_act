@@ -35,7 +35,10 @@ ros2 run vr_calibration vr_calibration --ros-args \
 
 주요 파일:
 
-- `vr_calibration/txt/for_vr_calibration_point_v7.txt`: 320 mm EE-to-TCP spindle용 기본 target waypoint 파일
+- `vr_calibration/txt/for_vr_calibration_point_v8.txt`: 320 mm EE-to-TCP spindle용 기본 target waypoint 파일
+  (v7 대비: home pose가 workpiece 중심(445, 394.5, 220)으로 바뀌면서, 위치용/평면 포인트 14개를
+  workpiece 쪽으로 절반 정도 옮기고 z를 표면(170mm) 위 220mm로 맞췄다. 회전 다양성용 24개는 그대로
+  두고, workpiece 사각형 코너 4개+중심 1개는 유지한 채 변 중점 4개를 추가했다. v7은 이전 버전으로 보존.)
 - `vr_calibration/txt/ur10_ee.txt`: 캡처된 EE pose 기록
 - `vr_calibration/txt/ur10_vr.txt`: 캡처된 VR pose 기록
 - `vive_tracker_ros2/yaml/calibration_matrix.yaml`: 최종 calibration YAML
