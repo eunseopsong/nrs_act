@@ -337,8 +337,8 @@ public:
     z_fix_enable_        = this->get_parameter("z_fix_enable").as_bool();
     z_fix_max_tilt_deg_  = this->get_parameter("z_fix_max_tilt_deg").as_double();
     position_residual_enable_ = this->get_parameter("position_residual_enable").as_bool();
-    position_residual_max_correction_m_ =
-      std::max(0.0, this->get_parameter("position_residual_max_correction_mm").as_double()) * 1e-3;
+    position_residual_max_correction_mm_ =
+      std::max(0.0, this->get_parameter("position_residual_max_correction_mm").as_double());
     waypoint_file_       = this->get_parameter("waypoint_file").as_string();
     ee_path_             = this->get_parameter("ee_output_file").as_string();
     vr_path_             = this->get_parameter("vr_output_file").as_string();
@@ -790,7 +790,7 @@ private:
   // position residual after T_FIX: quadratic-in-xy fit for (dx,dy,dz),
   // clamped as one joint 3D vector.
   bool position_residual_enable_{true};
-  double position_residual_max_correction_m_{0.010};
+  double position_residual_max_correction_mm_{10.0};
 
   // ---------- units ----------
   bool wp_rotvec_in_degrees_{false};
@@ -896,12 +896,12 @@ private:
     double center_x{0.0};
     double center_y{0.0};
     double scale_xy{1.0};
-    double max_abs_correction_m{0.010};
+    double max_abs_correction_mm{10.0};
     std::array<double,6> coeff_x{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
     std::array<double,6> coeff_y{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
     std::array<double,6> coeff_z{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
-    double rms_before_m{0.0};
-    double rms_after_m{0.0};
+    double rms_before_mm{0.0};
+    double rms_after_mm{0.0};
   };
   PositionResidualModel position_residual_model_;
 
@@ -1020,6 +1020,14 @@ private:
       RCLCPP_INFO(get_logger(),
         "[UNIT] raw_pose pos=%s max=%.3f",
         vr_pos_in_mm_ ? "MM" : "M", mabs);
+    }
+
+    // Internally raw_pose positions are kept in mm, matching currentP (see
+    // cbCurrentP). raw_pose is typically OpenVR SDK output (meters).
+    if (vr_pos_unit_decided_ && !vr_pos_in_mm_) {
+      last_vr_[0] *= 1000.0;
+      last_vr_[1] *= 1000.0;
+      last_vr_[2] *= 1000.0;
     }
   }
 
@@ -1319,32 +1327,25 @@ private:
     stats.window_s =
       (K >= 2) ? (clean_capture_samples_[last_idx].cp_t - clean_capture_samples_[first_idx].cp_t).seconds() : 0.0;
 
-    Eigen::Vector3d vr_pos_sum_m = Eigen::Vector3d::Zero();
+    // s.vr is already mm-normalized at ingestion (see cbVR).
+    Eigen::Vector3d vr_pos_sum_mm = Eigen::Vector3d::Zero();
     for (size_t sample_idx = first_idx; sample_idx <= last_idx; ++sample_idx) {
       const auto& s = clean_capture_samples_[sample_idx];
-      double vx = s.vr[0], vy = s.vr[1], vz = s.vr[2];
-      if (vr_pos_unit_decided_ && vr_pos_in_mm_) {
-        vx *= 1e-3; vy *= 1e-3; vz *= 1e-3;
-      }
-      vr_pos_sum_m += Eigen::Vector3d(vx, vy, vz);
+      vr_pos_sum_mm += Eigen::Vector3d(s.vr[0], s.vr[1], s.vr[2]);
       stats.avg_v_mms += s.vnorm_mms;
       stats.avg_w_dps += s.omega_dps;
       stats.avg_dist_mm += s.dist_mm;
       stats.avg_ang_deg += s.ang_deg;
     }
 
-    const Eigen::Vector3d vr_pos_mean_m = vr_pos_sum_m * invK;
+    const Eigen::Vector3d vr_pos_mean_mm = vr_pos_sum_mm * invK;
     double vr_var = 0.0;
     for (size_t sample_idx = first_idx; sample_idx <= last_idx; ++sample_idx) {
       const auto& s = clean_capture_samples_[sample_idx];
-      double vx = s.vr[0], vy = s.vr[1], vz = s.vr[2];
-      if (vr_pos_unit_decided_ && vr_pos_in_mm_) {
-        vx *= 1e-3; vy *= 1e-3; vz *= 1e-3;
-      }
-      vr_var += (Eigen::Vector3d(vx, vy, vz) - vr_pos_mean_m).squaredNorm();
+      vr_var += (Eigen::Vector3d(s.vr[0], s.vr[1], s.vr[2]) - vr_pos_mean_mm).squaredNorm();
     }
 
-    stats.vr_std_mm = std::sqrt(vr_var * invK) * 1000.0;
+    stats.vr_std_mm = std::sqrt(vr_var * invK);
     stats.avg_v_mms *= invK;
     stats.avg_w_dps *= invK;
     stats.avg_dist_mm *= invK;
@@ -1385,7 +1386,7 @@ private:
     cp_avg = {0,0,0,0,0,0};
     vr_avg = {0,0,0,0,0,0,1};
 
-    Eigen::Vector3d vr_pos_sum_m = Eigen::Vector3d::Zero();
+    // s.vr is already mm-normalized at ingestion (see cbVR).
     Eigen::Vector3d vr_pos_sum_raw = Eigen::Vector3d::Zero();
     Eigen::Vector4d q_sum = Eigen::Vector4d::Zero(); // coeffs: x,y,z,w
     bool have_q_ref = false;
@@ -1395,11 +1396,6 @@ private:
       const auto& s = clean_capture_samples_[sample_idx];
       for (int i=0; i<6; ++i) cp_avg[i] += s.cp[i];
 
-      double vx = s.vr[0], vy = s.vr[1], vz = s.vr[2];
-      if (vr_pos_unit_decided_ && vr_pos_in_mm_) {
-        vx *= 1e-3; vy *= 1e-3; vz *= 1e-3;
-      }
-      vr_pos_sum_m += Eigen::Vector3d(vx, vy, vz);
       vr_pos_sum_raw += Eigen::Vector3d(s.vr[0], s.vr[1], s.vr[2]);
 
       Eigen::Quaterniond q(s.vr[6], s.vr[3], s.vr[4], s.vr[5]);
@@ -1419,18 +1415,13 @@ private:
     dist_avg_mm = posDistMm(cp_avg, target_pose);
     ang_avg_deg = oriErrDeg(cp_avg, target_pose);
 
-    const Eigen::Vector3d vr_pos_mean_m = vr_pos_sum_m * invN;
     const Eigen::Vector3d vr_pos_mean_raw = vr_pos_sum_raw * invN;
     double vr_var = 0.0;
     for (size_t sample_idx = first_idx; sample_idx <= last_idx; ++sample_idx) {
       const auto& s = clean_capture_samples_[sample_idx];
-      double vx = s.vr[0], vy = s.vr[1], vz = s.vr[2];
-      if (vr_pos_unit_decided_ && vr_pos_in_mm_) {
-        vx *= 1e-3; vy *= 1e-3; vz *= 1e-3;
-      }
-      vr_var += (Eigen::Vector3d(vx, vy, vz) - vr_pos_mean_m).squaredNorm();
+      vr_var += (Eigen::Vector3d(s.vr[0], s.vr[1], s.vr[2]) - vr_pos_mean_raw).squaredNorm();
     }
-    const double vr_std_mm = std::sqrt(vr_var * invN) * 1000.0;
+    const double vr_std_mm = std::sqrt(vr_var * invN);
     if (enforce_vr_std && capture_max_vr_std_mm_ > 0.0 && vr_std_mm > capture_max_vr_std_mm_) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), steady_clock_, 2000,
@@ -1765,41 +1756,33 @@ private:
     std::array<double,9> Rarr;
     rotvecToRotMatRad(w_c, Rarr);
 
-    // --- write files (meters) ---
-    const double cp_x_m = cp[0] * 1e-3;
-    const double cp_y_m = cp[1] * 1e-3;
-    const double cp_z_m = cp[2] * 1e-3;
-
-    double vr_x = vr[0], vr_y = vr[1], vr_z = vr[2];
-    if (vr_pos_unit_decided_ && vr_pos_in_mm_) {
-      vr_x *= 1e-3; vr_y *= 1e-3; vr_z *= 1e-3;
-    }
-
+    // --- write files (mm) ---
+    // cp is already mm (see cbCurrentP); vr is already mm (see cbVR).
     ee_ofs_
-      << Rarr[0]<<" "<<Rarr[1]<<" "<<Rarr[2]<<" "<<cp_x_m<<" "
-      << Rarr[3]<<" "<<Rarr[4]<<" "<<Rarr[5]<<" "<<cp_y_m<<" "
-      << Rarr[6]<<" "<<Rarr[7]<<" "<<Rarr[8]<<" "<<cp_z_m<<"\n";
+      << Rarr[0]<<" "<<Rarr[1]<<" "<<Rarr[2]<<" "<<cp[0]<<" "
+      << Rarr[3]<<" "<<Rarr[4]<<" "<<Rarr[5]<<" "<<cp[1]<<" "
+      << Rarr[6]<<" "<<Rarr[7]<<" "<<Rarr[8]<<" "<<cp[2]<<"\n";
 
     vr_ofs_
-      << vr_x<<" "<<vr_y<<" "<<vr_z<<" "
+      << vr[0]<<" "<<vr[1]<<" "<<vr[2]<<" "
       << vr[3]<<" "<<vr[4]<<" "<<vr[5]<<" "<<vr[6]<<"\n";
 
     ee_ofs_.flush();
     vr_ofs_.flush();
 
-    // --- store samples for calibration (meters) ---
+    // --- store samples for calibration (mm) ---
     Eigen::Matrix3d R_ab;
     R_ab << Rarr[0], Rarr[1], Rarr[2],
             Rarr[3], Rarr[4], Rarr[5],
             Rarr[6], Rarr[7], Rarr[8];
-    Eigen::Vector3d p_ab(cp_x_m, cp_y_m, cp_z_m);
+    Eigen::Vector3d p_ab(cp[0], cp[1], cp[2]);
     T_AB_all_.push_back(makeT(R_ab, p_ab));
 
     // VR transform from quaternion (ROS order: x y z w)
     Eigen::Quaterniond q_vr(vr[6], vr[3], vr[4], vr[5]); // ctor: (w,x,y,z)
     q_vr.normalize();
     Eigen::Matrix3d R_dc = q_vr.toRotationMatrix();
-    Eigen::Vector3d p_dc(vr_x, vr_y, vr_z);
+    Eigen::Vector3d p_dc(vr[0], vr[1], vr[2]);
     T_DC_all_.push_back(makeT(R_dc, p_dc));
     sample_wp_indices_.push_back(wp_idx);
     captureGravitySample(cp, wp_idx);
@@ -1980,17 +1963,17 @@ private:
 
     RCLCPP_INFO(get_logger(),
       "[T_FIX] rx=%.4f ry=%.4f tz=%.3fmm",
-      rad2deg(rx), rad2deg(ry), tz * 1000.0);
+      rad2deg(rx), rad2deg(ry), tz);
     RCLCPP_INFO(get_logger(),
       "[T_FIX] z_rms %.3f -> %.3fmm",
-      rms_before * 1000.0, rms_after * 1000.0);
+      rms_before, rms_after);
 
     return T_fix;
   }
 
   // Evaluates the fitted (dx,dy,dz) correction at (x,y), with a joint
   // vector-norm clamp so the correction never moves a point by more than
-  // max_abs_correction_m in any direction.
+  // max_abs_correction_mm in any direction.
   Eigen::Vector3d evalPositionResidualCorrectionM(const PositionResidualModel& model, double x, double y) const
   {
     if (!model.valid) return Eigen::Vector3d::Zero();
@@ -2005,8 +1988,8 @@ private:
       cy[0] + cy[1] * xn + cy[2] * yn + cy[3] * xn * xn + cy[4] * xn * yn + cy[5] * yn * yn,
       cz[0] + cz[1] * xn + cz[2] * yn + cz[3] * xn * xn + cz[4] * xn * yn + cz[5] * yn * yn);
     const double mag = d.norm();
-    if (mag > model.max_abs_correction_m && mag > 1e-12) {
-      d *= (model.max_abs_correction_m / mag);
+    if (mag > model.max_abs_correction_mm && mag > 1e-12) {
+      d *= (model.max_abs_correction_mm / mag);
     }
     return d;
   }
@@ -2037,7 +2020,7 @@ private:
         p_cal = applyPositionResidualToPoint(p_cal);
       }
       const Eigen::Vector3d p_ref = T_AB_all_[i].block<3,1>(0,3);
-      residuals_mm.push_back((p_ref - p_cal).norm() * 1000.0);
+      residuals_mm.push_back((p_ref - p_cal).norm());
     }
     return residuals_mm;
   }
@@ -2107,7 +2090,7 @@ private:
                                                       const Eigen::Matrix4d& T_FIX)
   {
     PositionResidualModel model;
-    model.max_abs_correction_m = position_residual_max_correction_m_;
+    model.max_abs_correction_mm = position_residual_max_correction_mm_;
     const size_t N = T_AB_all_.size();
     if (!position_residual_enable_) {
       RCLCPP_INFO(get_logger(), "[POS_RES] disabled");
@@ -2117,7 +2100,7 @@ private:
       RCLCPP_WARN(get_logger(), "[POS_RES] need >=8; disabled");
       return model;
     }
-    if (model.max_abs_correction_m <= 0.0) {
+    if (model.max_abs_correction_mm <= 0.0) {
       RCLCPP_WARN(get_logger(), "[POS_RES] max correction zero");
       return model;
     }
@@ -2194,14 +2177,14 @@ private:
       max_abs_fit = std::max(max_abs_fit, d_fit.norm());
       rms_before += dx_list[i]*dx_list[i] + dy_list[i]*dy_list[i] + dz_list[i]*dz_list[i];
     }
-    if (max_abs_fit > model.max_abs_correction_m && max_abs_fit > 1e-12) {
-      const double scale = model.max_abs_correction_m / max_abs_fit;
+    if (max_abs_fit > model.max_abs_correction_mm && max_abs_fit > 1e-12) {
+      const double scale = model.max_abs_correction_mm / max_abs_fit;
       for (double& c : model.coeff_x) c *= scale;
       for (double& c : model.coeff_y) c *= scale;
       for (double& c : model.coeff_z) c *= scale;
       RCLCPP_WARN(get_logger(),
         "[POS_RES] fit %.3f > clamp %.3fmm",
-        max_abs_fit * 1000.0, model.max_abs_correction_m * 1000.0);
+        max_abs_fit, model.max_abs_correction_mm);
     }
 
     double rms_after = 0.0;
@@ -2215,25 +2198,25 @@ private:
       rms_after += ex*ex + ey*ey + ez*ez;
       max_after = std::max(max_after, std::sqrt(ex*ex + ey*ey + ez*ez));
     }
-    model.rms_before_m = std::sqrt(rms_before / static_cast<double>(N));
-    model.rms_after_m = std::sqrt(rms_after / static_cast<double>(N));
+    model.rms_before_mm = std::sqrt(rms_before / static_cast<double>(N));
+    model.rms_after_mm = std::sqrt(rms_after / static_cast<double>(N));
 
-    if (model.rms_after_m >= model.rms_before_m) {
+    if (model.rms_after_mm >= model.rms_before_mm) {
       RCLCPP_WARN(get_logger(),
         "[POS_RES] no gain %.3f -> %.3fmm",
-        model.rms_before_m * 1000.0, model.rms_after_m * 1000.0);
+        model.rms_before_mm, model.rms_after_mm);
       model.valid = false;
       return model;
     }
 
     RCLCPP_INFO(get_logger(),
       "[POS_RES] rms %.3f -> %.3fmm",
-      model.rms_before_m * 1000.0,
-      model.rms_after_m * 1000.0);
+      model.rms_before_mm,
+      model.rms_after_mm);
     RCLCPP_INFO(get_logger(),
       "[POS_RES] max=%.3fmm clamp=%.1fmm",
-      max_after * 1000.0,
-      model.max_abs_correction_m * 1000.0);
+      max_after,
+      model.max_abs_correction_mm);
     return model;
   }
 
@@ -2269,10 +2252,10 @@ private:
       }
     }
 
-    const double rms_mm = std::sqrt(sum2 / static_cast<double>(N)) * 1000.0;
+    const double rms_mm = std::sqrt(sum2 / static_cast<double>(N));
     RCLCPP_INFO(get_logger(),
       "[VALID] rms=%.3fmm max=%.3fmm",
-      rms_mm, max_err * 1000.0);
+      rms_mm, max_err);
     const bool have_wp_ids = (sample_wp_indices_.size() == N);
     RCLCPP_INFO(get_logger(),
       "[VALID] max_sample=%zu/%zu wp=%zu",
@@ -2280,11 +2263,11 @@ private:
       have_wp_ids ? (sample_wp_indices_[max_i] + 1) : 0);
     RCLCPP_INFO(get_logger(),
       "[VALID] max_ref=[%.1f %.1f %.1f]mm cal=[%.1f %.1f %.1f]mm err=[%.1f %.1f %.1f]mm",
-      max_p_ref.x() * 1000.0, max_p_ref.y() * 1000.0, max_p_ref.z() * 1000.0,
-      max_p_cal.x() * 1000.0, max_p_cal.y() * 1000.0, max_p_cal.z() * 1000.0,
-      (max_p_ref.x() - max_p_cal.x()) * 1000.0,
-      (max_p_ref.y() - max_p_cal.y()) * 1000.0,
-      (max_p_ref.z() - max_p_cal.z()) * 1000.0);
+      max_p_ref.x(), max_p_ref.y(), max_p_ref.z(),
+      max_p_cal.x(), max_p_cal.y(), max_p_cal.z(),
+      (max_p_ref.x() - max_p_cal.x()),
+      (max_p_ref.y() - max_p_cal.y()),
+      (max_p_ref.z() - max_p_cal.z()));
 
     if (rms_mm > max_calib_position_rms_mm_) {
       std::ostringstream oss;
@@ -2864,7 +2847,7 @@ private:
       int sign = 1;
       Eigen::Matrix4d T_BC = Eigen::Matrix4d::Identity();
       Eigen::Matrix4d T_AD_avg = Eigen::Matrix4d::Identity();
-      double fit_rms_m = std::numeric_limits<double>::infinity();
+      double fit_rms_mm = std::numeric_limits<double>::infinity();
     };
 
     auto evaluateCandidate = [&](const Eigen::Matrix3d& R_raw, int sign) {
@@ -2922,22 +2905,22 @@ private:
         const double err = (p_ref - p_cal).norm();
         sum2 += err * err;
       }
-      cand.fit_rms_m = std::sqrt(sum2 / static_cast<double>(N_all));
+      cand.fit_rms_mm = std::sqrt(sum2 / static_cast<double>(N_all));
       return cand;
     };
 
     const HandEyeCandidate cand_pos = evaluateCandidate(R_BC_raw, 1);
     const HandEyeCandidate cand_neg = evaluateCandidate(-R_BC_raw, -1);
     const HandEyeCandidate& best =
-      (cand_pos.fit_rms_m <= cand_neg.fit_rms_m) ? cand_pos : cand_neg;
+      (cand_pos.fit_rms_mm <= cand_neg.fit_rms_mm) ? cand_pos : cand_neg;
     const HandEyeCandidate& alt = (&best == &cand_pos) ? cand_neg : cand_pos;
 
     RCLCPP_INFO(get_logger(),
       "[HAND_EYE] sign=%+d fit_rms=%.3fmm alt=%+d %.3fmm",
       best.sign,
-      best.fit_rms_m * 1000.0,
+      best.fit_rms_mm,
       alt.sign,
-      alt.fit_rms_m * 1000.0);
+      alt.fit_rms_mm);
 
     if (rejectWorstHandeyeOutlier(
           best.T_AD_avg,
@@ -3019,7 +3002,7 @@ private:
     ofs << "  z_fix_max_tilt_deg: " << std::fixed << std::setprecision(prec) << z_fix_max_tilt_deg_ << "\n";
     ofs << "  position_residual_enable: " << (position_residual_enable_ ? "true" : "false") << "\n";
     ofs << "  position_residual_max_correction_mm: " << std::fixed << std::setprecision(prec)
-        << position_residual_max_correction_m_ * 1000.0 << "\n";
+        << position_residual_max_correction_mm_ << "\n";
     ofs << "  handeye_outlier_reject_enable: " << (handeye_outlier_reject_enable_ ? "true" : "false") << "\n";
     ofs << "  handeye_outlier_max_reject: " << handeye_outlier_max_reject_ << "\n";
     ofs << "  handeye_outlier_abs_mm: " << std::fixed << std::setprecision(prec)
@@ -3052,7 +3035,7 @@ private:
 
     ofs << "# optional position residual correction after T_FIX:\n";
     ofs << "# (x,y,z) += (fx,fy,fz)((x-center_x)/scale_xy, (y-center_y)/scale_xy),\n";
-    ofs << "# joint (dx,dy,dz) vector clamped to max_abs_correction_m.\n";
+    ofs << "# joint (dx,dy,dz) vector clamped to max_abs_correction_mm.\n";
     ofs << "POSITION_RESIDUAL:\n";
     ofs << "  enabled: " << (position_residual_model_.valid ? "true" : "false") << "\n";
     ofs << std::fixed << std::setprecision(prec);
@@ -3060,9 +3043,9 @@ private:
     ofs << "  center_x: " << position_residual_model_.center_x << "\n";
     ofs << "  center_y: " << position_residual_model_.center_y << "\n";
     ofs << "  scale_xy: " << position_residual_model_.scale_xy << "\n";
-    ofs << "  max_abs_correction_m: " << position_residual_model_.max_abs_correction_m << "\n";
-    ofs << "  rms_before_m: " << position_residual_model_.rms_before_m << "\n";
-    ofs << "  rms_after_m: " << position_residual_model_.rms_after_m << "\n";
+    ofs << "  max_abs_correction_mm: " << position_residual_model_.max_abs_correction_mm << "\n";
+    ofs << "  rms_before_mm: " << position_residual_model_.rms_before_mm << "\n";
+    ofs << "  rms_after_mm: " << position_residual_model_.rms_after_mm << "\n";
     ofs << "  coeff_x: [";
     for (size_t i=0; i<position_residual_model_.coeff_x.size(); ++i) {
       ofs << position_residual_model_.coeff_x[i];

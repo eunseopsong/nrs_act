@@ -812,7 +812,7 @@ class VrDemoTxtRecorder(Node):
         if len(msg.data) < 6:
             return
         x, y, z, rx, ry, rz = msg.data[:6]
-        value = np.array([1000.0 * x, 1000.0 * y, 1000.0 * z, rx, ry, rz], dtype=np.float64)
+        value = np.array([x, y, z, rx, ry, rz], dtype=np.float64)
         stamp = time.time()
         self.latest_pose6_mm_rad = value
         self.latest_pose_t = stamp

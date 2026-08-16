@@ -385,8 +385,10 @@ class HDF5Recorder(Node):
         declare("recording_status_period_sec", 1.0)
         declare("idle_status_period_sec", 0.0)
 
-        # Unit convention
-        declare("pose_xyz_scale", 1000.0)  # m -> mm
+        # Unit convention. Both /ur10skku/currentP and /calibrated_pose are
+        # natively mm now; this default is auto-corrected to 1.0 below
+        # unless a launch arg explicitly overrides it to something else.
+        declare("pose_xyz_scale", 1000.0)
 
         # Stage-1-compatible force / pose trajectory filtering
         declare("force_filter_mode", "ema")  # ema | contact_cleanup
@@ -511,10 +513,14 @@ class HDF5Recorder(Node):
         self.recording_status_period_sec = float(self.get_parameter("recording_status_period_sec").value)
         self.idle_status_period_sec = float(self.get_parameter("idle_status_period_sec").value)
         self.pose_xyz_scale = float(self.get_parameter("pose_xyz_scale").value)
-        if self.recording_mode == "robot" and abs(self.pose_xyz_scale - 1000.0) < 1e-9:
+        if abs(self.pose_xyz_scale - 1000.0) < 1e-9:
+            # Both /ur10skku/currentP (robot mode) and /calibrated_pose
+            # (tracker mode) are natively mm now; a launch file/caller left
+            # pose_xyz_scale at the old m->mm default, which would double
+            # the position values. Override to 1.0 in both modes.
             self.pose_xyz_scale = 1.0
             self.get_logger().warn(
-                "[UNIT] robot recording uses /ur10skku/currentP in mm; "
+                f"[UNIT] {self.recording_mode} recording pose topic is already mm; "
                 "overriding pose_xyz_scale 1000.0 -> 1.0 to avoid x1000 datasets."
             )
         self.force_filter_mode = str(self.get_parameter("force_filter_mode").value)

@@ -24,7 +24,7 @@ class RobotTCPController(Node):
         super().__init__("robot_tcp_controller")
         
         # 파라미터 선언
-        self.declare_parameter('max_linear_velocity', 0.1)  # m/s
+        self.declare_parameter('max_linear_velocity', 100.0)  # mm/s
         self.declare_parameter('max_angular_velocity', 0.5)  # rad/s
         self.declare_parameter('enable_robot_control', False)  # 안전 파라미터
         self.declare_parameter('robot_base_frame', 'base')  # 로봇의 베이스 프레임
@@ -104,11 +104,11 @@ class RobotTCPController(Node):
     
     def is_pose_safe(self, pose: Pose) -> bool:
         """포즈가 안전한 작업 영역 내에 있는지 검사"""
-        # 로봇의 안전 작업 영역 한계 설정 (미터 단위)
+        # 로봇의 안전 작업 영역 한계 설정 (mm 단위)
         # 이 값은 로봇의 모델과 설치 환경에 맞게 조정해야 합니다
-        x_limits = [-1.0, 1.0]  # x축 한계
-        y_limits = [-1.0, 1.0]  # y축 한계
-        z_limits = [0.1, 2.0]   # z축 한계 (바닥 위)
+        x_limits = [-1000.0, 1000.0]  # x축 한계
+        y_limits = [-1000.0, 1000.0]  # y축 한계
+        z_limits = [100.0, 2000.0]    # z축 한계 (바닥 위)
         
         x, y, z = pose.position.x, pose.position.y, pose.position.z
         
@@ -136,7 +136,7 @@ class RobotTCPController(Node):
         
         # 선형 속도 확인
         if linear_vel > self.max_linear_vel:
-            self.get_logger().warn(f"선형 속도 {linear_vel:.3f}m/s가 제한 {self.max_linear_vel}m/s을 초과합니다.")
+            self.get_logger().warn(f"선형 속도 {linear_vel:.3f}mm/s가 제한 {self.max_linear_vel}mm/s을 초과합니다.")
             return False
             
         # 각속도 검사도 추가할 수 있음

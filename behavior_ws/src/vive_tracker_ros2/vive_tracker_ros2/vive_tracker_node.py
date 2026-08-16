@@ -29,7 +29,7 @@ from vive_tracker_ros2.utils import (
 import ament_index_python.packages
 
 
-T_CE_RUNTIME_Z_BIAS_M = 0.051
+T_CE_RUNTIME_Z_BIAS_MM = 51.0
 
 
 # -------------------------
@@ -60,14 +60,17 @@ def rot_z(th_rad: float) -> np.ndarray:
 
 
 def openvr_pose_to_np44(pose) -> np.ndarray:
+    # OpenVR SDK reports translation in meters; convert to mm here so every
+    # downstream consumer (this node's own transform chain, /raw_pose,
+    # vr_calibration.cpp) is natively mm from this one point onward.
     m = pose.mDeviceToAbsoluteTracking
     M = np.eye(4, dtype=np.float64)
     M[0, 0] = m[0][0]; M[0, 1] = m[0][1]; M[0, 2] = m[0][2]
     M[1, 0] = m[1][0]; M[1, 1] = m[1][1]; M[1, 2] = m[1][2]
     M[2, 0] = m[2][0]; M[2, 1] = m[2][1]; M[2, 2] = m[2][2]
-    M[0, 3] = m[0][3]
-    M[1, 3] = m[1][3]
-    M[2, 3] = m[2][3]
+    M[0, 3] = m[0][3] * 1000.0
+    M[1, 3] = m[1][3] * 1000.0
+    M[2, 3] = m[2][3] * 1000.0
     return M
 
 
@@ -185,7 +188,7 @@ class ViveTracker(Node):
         # /raw_pose PoseStamped
         self.raw_pose_pub_pose = self.create_publisher(PoseStamped, "/raw_pose", 10)
 
-        # /calibrated_pose: [x y z wx wy wz] (m, rad)
+        # /calibrated_pose: [x y z wx wy wz] (mm, rad)
         self.calibrated_pose_pub = self.create_publisher(Float64MultiArray, "/calibrated_pose", 10)
 
         self.calibrate_srv = self.create_service(ViveCalibration, "vive_tracker_ros/calibrate", self.cb_calibrate)
@@ -437,7 +440,7 @@ class ViveTracker(Node):
         # Runtime applies the final offset along negative local-z after adding
         # the fixed mount bias, so +dz in YAML lowers published z by about dz.
         T_CE = T_CE_yaml.copy()
-        T_CE[2, 3] = -(T_CE_yaml[2, 3] + T_CE_RUNTIME_Z_BIAS_M)
+        T_CE[2, 3] = -(T_CE_yaml[2, 3] + T_CE_RUNTIME_Z_BIAS_MM)
         return T_CE
 
     def _set_T_CE(self, T_CE_yaml: np.ndarray):
@@ -450,7 +453,7 @@ class ViveTracker(Node):
             f"{self.T_CE[1,3]:.4f} {self.T_CE[2,3]:.4f}] "
             f"runtime_t=[{self.T_CE_runtime[0,3]:.4f} "
             f"{self.T_CE_runtime[1,3]:.4f} {self.T_CE_runtime[2,3]:.4f}] "
-            f"z_bias={T_CE_RUNTIME_Z_BIAS_M:.4f}"
+            f"z_bias={T_CE_RUNTIME_Z_BIAS_MM:.4f}"
         )
 
     def _load_position_residual(self, node):
@@ -473,14 +476,14 @@ class ViveTracker(Node):
                 "center_x": float(node.get("center_x", 0.0)),
                 "center_y": float(node.get("center_y", 0.0)),
                 "scale_xy": max(1e-6, float(node.get("scale_xy", 1.0))),
-                "max_abs_correction_m": max(0.0, float(node.get("max_abs_correction_m", 0.0))),
+                "max_abs_correction_mm": max(0.0, float(node.get("max_abs_correction_mm", 0.0))),
                 "coeff_x": coeff_x,
                 "coeff_y": coeff_y,
                 "coeff_z": coeff_z,
             }
             self.get_logger().info(
                 "[POSITION_RESIDUAL] loaded quadratic_xy position correction "
-                f"(clamp={out['max_abs_correction_m'] * 1000.0:.1f}mm)."
+                f"(clamp={out['max_abs_correction_mm']:.1f}mm)."
             )
             return out
         except Exception as e:
@@ -501,7 +504,7 @@ class ViveTracker(Node):
         dx = cx[0] + cx[1] * xn + cx[2] * yn + cx[3] * xn * xn + cx[4] * xn * yn + cx[5] * yn * yn
         dy = cy[0] + cy[1] * xn + cy[2] * yn + cy[3] * xn * xn + cy[4] * xn * yn + cy[5] * yn * yn
         dz = cz[0] + cz[1] * xn + cz[2] * yn + cz[3] * xn * xn + cz[4] * xn * yn + cz[5] * yn * yn
-        clamp = self.POSITION_RESIDUAL["max_abs_correction_m"]
+        clamp = self.POSITION_RESIDUAL["max_abs_correction_mm"]
         if clamp > 0.0:
             mag = float(np.sqrt(dx * dx + dy * dy + dz * dz))
             if mag > clamp:

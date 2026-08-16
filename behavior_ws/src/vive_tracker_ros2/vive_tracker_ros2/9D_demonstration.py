@@ -13,13 +13,13 @@ from rclpy.qos import qos_profile_sensor_data
 class Demo9DRecorder(Node):
     """
     Subscribe:
-      - /calibrated_pose (Float64MultiArray): [x y z wx wy wz]  (m, rad)
+      - /calibrated_pose (Float64MultiArray): [x y z wx wy wz]  (mm, rad)
       - /ftsensor/measured_Cvalue (Wrench): force.{x,y,z} (N)
 
     Save row:
       x y z wx wy wz fx fy fz
     Unit:
-      x,y,z: mm (m->mm), w: rad, f: N
+      x,y,z: mm, w: rad, f: N
 
     Episode rule:
       start: |fx| >= 10 AND pose_ready
@@ -129,13 +129,8 @@ class Demo9DRecorder(Node):
         if not (self._fresh_pose() and self._fresh_ft()):
             return False
 
-        x_m, y_m, z_m, wx, wy, wz = self.latest_pose
+        x_mm, y_mm, z_mm, wx, wy, wz = self.latest_pose
         fx, fy, fz = self.latest_ft
-
-        # m -> mm
-        x_mm = x_m * 1000.0
-        y_mm = y_m * 1000.0
-        z_mm = z_m * 1000.0
 
         line = (
             f"{x_mm:.10f} {y_mm:.10f} {z_mm:.10f} "

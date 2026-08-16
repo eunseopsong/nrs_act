@@ -3,7 +3,7 @@
 """
 vr_stage1_hdf5_recorder.py
 
-- VR tracker: /calibrated_pose (Float64MultiArray: [x y z wx wy wz])   input: (m, rad)
+- VR tracker: /calibrated_pose (Float64MultiArray: [x y z wx wy wz])   input: (mm, rad)
 - FT sensor : /ftsensor/measured_Cvalue (geometry_msgs/Wrench)        input: (N)
 
 Episode rule:
@@ -731,7 +731,7 @@ class VRStage1HDF5Recorder(Node):
         if len(msg.data) < 6:
             return
         x, y, z, wx, wy, wz = msg.data[:6]
-        pose = np.array([1000.0 * x, 1000.0 * y, 1000.0 * z, wx, wy, wz], dtype=np.float64)
+        pose = np.array([x, y, z, wx, wy, wz], dtype=np.float64)
         stamp = time.time()
         with self.state_lock:
             self.latest_pose6_mm_rad = pose
